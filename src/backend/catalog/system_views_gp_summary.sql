@@ -120,7 +120,11 @@ SELECT
     s.vacuum_count,
     s.autovacuum_count,
     s.analyze_count,
-    s.autoanalyze_count
+    s.autoanalyze_count,
+    m.total_vacuum_time,
+    m.total_autovacuum_time,
+    m.total_analyze_time,
+    m.total_autoanalyze_time
 FROM
     (SELECT
          allt.relid,
@@ -148,7 +152,11 @@ FROM
          max(vacuum_count) as vacuum_count,
          max(autovacuum_count) as autovacuum_count,
          max(analyze_count) as analyze_count,
-         max(autoanalyze_count) as autoanalyze_count
+         max(autoanalyze_count) as autoanalyze_count,
+         case when d.policytype = 'r' then (sum(total_vacuum_time)/d.numsegments) else sum(total_vacuum_time) end total_vacuum_time,
+         case when d.policytype = 'r' then (sum(total_autovacuum_time)/d.numsegments) else sum(total_autovacuum_time) end total_autovacuum_time,
+         case when d.policytype = 'r' then (sum(total_analyze_time)/d.numsegments) else sum(total_analyze_time) end total_analyze_time,
+         case when d.policytype = 'r' then (sum(total_autoanalyze_time)/d.numsegments) else sum(total_autoanalyze_time) end total_autoanalyze_time
      FROM
          gp_dist_random('pg_stat_all_tables') allt
          inner join pg_class c
