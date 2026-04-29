@@ -17,7 +17,7 @@
  *
  *CREATE OR REPLACE FUNCTION gp_distribution_policy_table_check(oid, smallint[])
  * RETURNS bool
- * AS '$libdir/gp_distribution_policy.so','gp_distribution_policy_table_check'
+ * AS '$libdir/gp_distribution_policy','gp_distribution_policy_table_check'
  * LANGUAGE C VOLATILE STRICT; *
  */
 

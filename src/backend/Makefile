@@ -99,6 +99,10 @@ SYMBOL_MAP_FILE = hide_symbols.list
 $(SYMBOL_MAP_FILE): $(top_builddir)/src/interfaces/libpq/exports.txt
 	$(AWK) '/^[^\043]/ {printf "_%s\n",$$1}' $< | grep -v -E $(SAFELY_EXPORTED_SYMBOLS_PATTERN) >$@
 SYMBOL_MAPPING_FLAGS = -unexported_symbols_list $(SYMBOL_MAP_FILE)
+# macOS dyld cannot resolve a -shared library whose install_name is the bare
+# filename; give libpostgres.so its absolute install path so the postgres
+# binary can find it at run time.
+libpostgres_install_name = -Wl,-install_name,$(libdir)/libpostgres.so
 endif
 
 ifeq ($(PORTNAME), linux)
@@ -111,6 +115,7 @@ ifeq ($(enable_shared_postgres_backend),yes)
 all: libpostgres.so
 libpostgres.so: $(OBJS) $(SYMBOL_MAP_FILE)
 	$(CXX) -shared $(CXXFLAGS) $(LDFLAGS) $(LDFLAGS_SL) $(export_dynamic) \
+	  $(libpostgres_install_name) \
 	  $(filter-out main/main.o, $(call expand_subsys,$(OBJS))) $(LIBS) $(SYMBOL_MAPPING_FLAGS) -o $@
 
 # if enable-build-postgres-with-shared is yes, link postgres with shared library libpostgres.so

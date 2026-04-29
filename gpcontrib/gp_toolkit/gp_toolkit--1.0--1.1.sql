@@ -105,7 +105,7 @@ GRANT SELECT ON gp_toolkit.gp_workfile_usage_per_query TO public;
 
 CREATE TYPE gp_toolkit.__iostats AS (segindex int4, rsgname text, groupid oid, tablespace text, "rbps" int8, "wbps" int8, "riops" int8, "wiops" int8);
 
-CREATE FUNCTION gp_toolkit.__gp_resgroup_iostats() RETURNS SETOF gp_toolkit.__iostats AS 'gp_toolkit.so','pg_resgroup_get_iostats' LANGUAGE C STRICT;
+CREATE FUNCTION gp_toolkit.__gp_resgroup_iostats() RETURNS SETOF gp_toolkit.__iostats AS '$libdir/gp_toolkit','pg_resgroup_get_iostats' LANGUAGE C STRICT;
 
 GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_resgroup_iostats TO public;
 

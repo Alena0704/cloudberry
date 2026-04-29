@@ -130,8 +130,10 @@ ifeq ($(PORTNAME), darwin)
     shlib		= lib$(NAME).$(SO_MAJOR_VERSION)$(DLSUFFIX)
     shlib_major		= lib$(NAME).$(SO_MAJOR_VERSION)$(DLSUFFIX)
   else
-    # loadable module
-    LINK.shared		= $(COMPILER) -bundle
+    # loadable module — symbols (e.g. UtfToLocal) are resolved at load time
+    # against the host postgres binary; modern macOS clang requires the flag
+    # to be explicit.
+    LINK.shared		= $(COMPILER) -bundle -Wl,-undefined,dynamic_lookup
   endif
   BUILD.exports		= $(AWK) '/^[^\043]/ {printf "_%s\n",$$1}' $< >$@
   exports_file		= $(SHLIB_EXPORTS:%.txt=%.list)

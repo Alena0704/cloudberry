@@ -101,7 +101,7 @@ The "gp_ao_co_diagnostics" shared library contains nine functions.
          , modcount bigint
          , state smallint
          ) 
-         AS '$libdir/gp_ao_co_diagnostics.so'
+         AS '$libdir/gp_ao_co_diagnostics'
         , 'gp_aoseg_history_wrapper' LANGUAGE C STRICT;
 
 
@@ -115,7 +115,7 @@ The "gp_ao_co_diagnostics" shared library contains nine functions.
                        , eof_uncompressed bigint
                        , state smallint
                        )
-         AS '$libdir/gp_ao_co_diagnostics.so'
+         AS '$libdir/gp_ao_co_diagnostics'
           , 'gp_aocsseg_wrapper' LANGUAGE C STRICT;
 
 
@@ -140,7 +140,7 @@ The "gp_ao_co_diagnostics" shared library contains nine functions.
                        , modcount bigint
                        , state smallint
                        )
-         AS '$libdir/gp_ao_co_diagnostics.so'
+         AS '$libdir/gp_ao_co_diagnostics'
           , 'gp_aocsseg_history_wrapper' LANGUAGE C STRICT;
 
 
@@ -148,7 +148,7 @@ The "gp_ao_co_diagnostics" shared library contains nine functions.
         RETURNS TABLE ( tid tid
                       , segno integer
                       , row_num bigint) 
-         AS '$libdir/gp_ao_co_diagnostics.so'
+         AS '$libdir/gp_ao_co_diagnostics'
           , 'gp_aovisimap_wrapper' LANGUAGE C STRICT;
 
 
@@ -156,7 +156,7 @@ The "gp_ao_co_diagnostics" shared library contains nine functions.
         RETURNS TABLE (segno integer
                        , hidden_tupcount bigint
                        , total_tupcount bigint) 
-        AS '$libdir/gp_ao_co_diagnostics.so'
+        AS '$libdir/gp_ao_co_diagnostics'
          ,'gp_aovisimap_hidden_info_wrapper' LANGUAGE C STRICT;
 
 
@@ -165,7 +165,7 @@ The "gp_ao_co_diagnostics" shared library contains nine functions.
                        , first_row_num bigint
                        , hidden_tupcount int
                        , bitmap text) 
-        AS '$libdir/gp_ao_co_diagnostics.so'
+        AS '$libdir/gp_ao_co_diagnostics'
          ,'gp_aovisimap_entry' LANGUAGE C STRICT;
  
 

@@ -142,7 +142,7 @@ $$;
 --------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION gp_toolkit.pg_partition_rank(rp regclass)
     RETURNS int
-AS 'gp_toolkit.so', 'pg_partition_rank'
+AS '$libdir/gp_toolkit', 'pg_partition_rank'
     LANGUAGE C VOLATILE STRICT NO SQL;
 
 GRANT EXECUTE ON FUNCTION gp_toolkit.pg_partition_rank(regclass) TO public;
@@ -316,7 +316,7 @@ GRANT EXECUTE ON FUNCTION gp_toolkit.pg_partition_isdefault(regclass) TO public;
 --------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION gp_toolkit.pg_partition_lowest_child(rp regclass)
     RETURNS regclass
-AS 'gp_toolkit.so', 'pg_partition_lowest_child'
+AS '$libdir/gp_toolkit', 'pg_partition_lowest_child'
     LANGUAGE C VOLATILE STRICT NO SQL;
 
 GRANT EXECUTE ON FUNCTION gp_toolkit.pg_partition_lowest_child(regclass) TO public;
@@ -335,7 +335,7 @@ GRANT EXECUTE ON FUNCTION gp_toolkit.pg_partition_lowest_child(regclass) TO publ
 --------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION gp_toolkit.pg_partition_highest_child(rp regclass)
     RETURNS regclass
-AS 'gp_toolkit.so', 'pg_partition_highest_child'
+AS '$libdir/gp_toolkit', 'pg_partition_highest_child'
     LANGUAGE C VOLATILE STRICT NO SQL;
 
 GRANT EXECUTE ON FUNCTION gp_toolkit.pg_partition_highest_child(regclass) TO public;
@@ -355,7 +355,7 @@ CREATE TYPE get_partition_result AS (
 
 CREATE OR REPLACE FUNCTION gp_toolkit.gp_get_partitions(rp regclass)
     RETURNS SETOF get_partition_result
-AS 'gp_toolkit.so', 'gp_get_partitions'
+AS '$libdir/gp_toolkit', 'gp_get_partitions'
     LANGUAGE C VOLATILE STRICT NO SQL;
 
 GRANT EXECUTE ON FUNCTION gp_toolkit.gp_get_partitions(regclass) TO public;

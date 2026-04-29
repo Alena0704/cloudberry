@@ -1,1 +1,9 @@
+# Keep -Werror on Linux to preserve CI strictness, but disable on macOS
+# where pre-existing flex/clang/CURL/format quirks (pg_task.h GNU
+# variable-sized types, url_curl.c CURLMcode/CURLcode, dirtablecmds.c
+# %ld vs int64_t, execMain.c unused MotionState) otherwise turn into
+# hard errors with newer Apple clang. Adjust the guard if you need to
+# treat warnings as errors on macOS too (e.g. for a CI sweep).
+ifeq ($(PORTNAME),linux)
 CUSTOM_COPT += -Werror
+endif
