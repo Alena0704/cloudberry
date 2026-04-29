@@ -23,22 +23,14 @@
 #include "bootparse.h"
 #include "utils/guc.h"
 
-#define unify_version(a,b,c) ((a<<16)+(b<<8)+c)
-
-#if unify_version(YY_FLEX_MAJOR_VERSION,YY_FLEX_MINOR_VERSION,YY_FLEX_SUBMINOR_VERSION) < unify_version(2,5,35)
-/* These routines aren't used, but are defined to supress warnings from gcc */
-int boot_yyget_lineno  (void);
-FILE *boot_yyget_in  (void);
-FILE *boot_yyget_out  (void);
-int boot_yyget_leng  (void);
-char *boot_yyget_text  (void);
-void boot_yyset_lineno (int  line_number );
-void boot_yyset_in (FILE *  in_str );
-void boot_yyset_out (FILE *  out_str );
-int boot_yyget_debug  (void);
-void boot_yyset_debug (int  bdebug );
-int boot_yylex_destroy  (void);
-#endif
+/*
+ * Old (< 2.5.35) flex needed forward declarations for these routines to
+ * suppress unused-function warnings; the modern flex (>= 2.5.35) emits the
+ * declarations itself with platform-correct types (yy_size_t for *_leng).
+ * Keeping the legacy `int` forward decls here clashes with flex 2.6+ on
+ * macOS clang. Apple flex 2.5.35+ has been the baseline for years; drop
+ * the legacy block entirely.
+ */
 
 
 
