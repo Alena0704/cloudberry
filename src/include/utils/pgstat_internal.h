@@ -219,6 +219,22 @@ typedef struct PgStat_KindInfo
 	bool		named_on_disk:1;
 
 	/*
+	 * Should the entries of this kind be persisted to / restored from the
+	 * stats file? Backported from PG18 (commit f98dbdeb51) — currently
+	 * unused on cloudberry; persistence loops walk only builtin kinds, so
+	 * custom-kind entries are effectively shmem-only across postmaster
+	 * restarts. Extensions may set this for forward-compat.
+	 */
+	bool		write_to_file:1;
+
+	/*
+	 * Should pgstat_get_entry_count() track entries of this kind? Backported
+	 * from PG18 — currently informational only on cloudberry;
+	 * pgstat_get_entry_count() walks the shared hash regardless.
+	 */
+	bool		track_entry_count:1;
+
+	/*
 	 * The size of an entry in the shared stats hash table (pointed to by
 	 * PgStatShared_HashEntry->body).
 	 */

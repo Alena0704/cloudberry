@@ -98,6 +98,7 @@
 #include "lib/dshash.h"
 #include "libpq/pqformat.h"
 #include "libpq-int.h"
+#include "miscadmin.h"
 #include "pgstat.h"
 #include "port/atomics.h"
 #include "storage/fd.h"
@@ -181,6 +182,15 @@ static void pgstat_build_snapshot(void);
 static void pgstat_build_snapshot_fixed(PgStat_Kind kind);
 
 static inline bool pgstat_is_kind_valid(int ikind);
+static inline bool pgstat_is_kind_builtin(int ikind);
+static inline bool pgstat_is_kind_custom(int ikind);
+
+/*
+ * Per-process registration table for custom cumulative-statistics kinds.
+ * Populated by pgstat_register_kind(), called from extension _PG_init() while
+ * loading shared_preload_libraries.  See PG18 commit f98dbdeb51.
+ */
+static const PgStat_KindInfo *pgstat_kind_custom_infos[PGSTAT_KIND_CUSTOM_SIZE] = {0};
 
 
 /* ----------
@@ -1272,6 +1282,13 @@ pgstat_get_kind_from_str(char *kind_str)
 			return kind;
 	}
 
+	for (int i = 0; i < PGSTAT_KIND_CUSTOM_SIZE; i++)
+	{
+		if (pgstat_kind_custom_infos[i] != NULL &&
+			pg_strcasecmp(kind_str, pgstat_kind_custom_infos[i]->name) == 0)
+			return PGSTAT_KIND_CUSTOM_MIN + i;
+	}
+
 	ereport(ERROR,
 			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 			 errmsg("invalid statistics kind: \"%s\"", kind_str)));
@@ -1279,17 +1296,115 @@ pgstat_get_kind_from_str(char *kind_str)
 }
 
 static inline bool
-pgstat_is_kind_valid(int ikind)
+pgstat_is_kind_builtin(int ikind)
 {
 	return ikind >= PGSTAT_KIND_FIRST_VALID && ikind <= PGSTAT_KIND_LAST;
+}
+
+static inline bool
+pgstat_is_kind_custom(int ikind)
+{
+	return ikind >= PGSTAT_KIND_CUSTOM_MIN && ikind <= PGSTAT_KIND_CUSTOM_MAX;
+}
+
+static inline bool
+pgstat_is_kind_valid(int ikind)
+{
+	if (pgstat_is_kind_builtin(ikind))
+		return true;
+	if (pgstat_is_kind_custom(ikind))
+		return pgstat_kind_custom_infos[ikind - PGSTAT_KIND_CUSTOM_MIN] != NULL;
+	return false;
 }
 
 const PgStat_KindInfo *
 pgstat_get_kind_info(PgStat_Kind kind)
 {
-	Assert(pgstat_is_kind_valid(kind));
+	if (pgstat_is_kind_builtin(kind))
+		return &pgstat_kind_infos[kind];
 
-	return &pgstat_kind_infos[kind];
+	if (pgstat_is_kind_custom(kind))
+		return pgstat_kind_custom_infos[kind - PGSTAT_KIND_CUSTOM_MIN];
+
+	Assert(false);
+	return NULL;
+}
+
+/*
+ * Register a custom cumulative-statistics kind.
+ *
+ * Backported from PG18 (commit f98dbdeb51).  Extensions call this in their
+ * _PG_init() while loading from shared_preload_libraries; the kind_info must
+ * remain valid for the lifetime of the process.
+ */
+void
+pgstat_register_kind(PgStat_Kind kind, const PgStat_KindInfo *kind_info)
+{
+	uint32		idx;
+
+	if (kind_info->name == NULL || strlen(kind_info->name) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("custom cumulative statistics name is invalid"),
+				 errhint("Provide a non-empty name for the custom cumulative statistics.")));
+
+	if (!pgstat_is_kind_custom(kind))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("custom cumulative statistics ID %u is out of range", kind),
+				 errhint("Provide a custom cumulative statistics ID between %u and %u.",
+						 PGSTAT_KIND_CUSTOM_MIN, PGSTAT_KIND_CUSTOM_MAX)));
+
+	idx = kind - PGSTAT_KIND_CUSTOM_MIN;
+
+	if (pgstat_kind_custom_infos[idx] != NULL &&
+		pgstat_kind_custom_infos[idx]->name != NULL)
+		ereport(ERROR,
+				(errmsg("failed to register custom cumulative statistics \"%s\" with ID %u",
+						kind_info->name, kind),
+				 errdetail("Custom cumulative statistics \"%s\" already registered with the same ID.",
+						   pgstat_kind_custom_infos[idx]->name)));
+
+	/*
+	 * Custom kinds rely on a per-process registration table, so to ensure
+	 * that all backends see consistent state the registration must happen
+	 * during shared_preload_libraries loading.
+	 */
+	if (!process_shared_preload_libraries_in_progress)
+		ereport(ERROR,
+				(errmsg("failed to register custom cumulative statistics \"%s\"",
+						kind_info->name),
+				 errdetail("Custom cumulative statistics must be registered while initializing modules in \"shared_preload_libraries\".")));
+
+	pgstat_kind_custom_infos[idx] = kind_info;
+	ereport(LOG,
+			(errmsg("registered custom cumulative statistics \"%s\" with ID %u",
+					kind_info->name, kind)));
+}
+
+/*
+ * Return the count of entries in the shared hash for a given kind.
+ *
+ * Backported from PG18 (commit f98dbdeb51).  Walks the shared hash holding a
+ * shared exclusive lock — O(N) over total entries — so callers should treat
+ * this as a slow path.
+ */
+int64
+pgstat_get_entry_count(PgStat_Kind kind)
+{
+	int64		count = 0;
+	dshash_seq_status hstat;
+	PgStatShared_HashEntry *p;
+
+	dshash_seq_init(&hstat, pgStatLocal.shared_hash, false);
+	while ((p = dshash_seq_next(&hstat)) != NULL)
+	{
+		if (p->key.kind == kind)
+			count++;
+	}
+	dshash_seq_term(&hstat);
+
+	return count;
 }
 
 /*
