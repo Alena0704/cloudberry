@@ -158,7 +158,7 @@ typedef struct f_smgr
 
 typedef struct f_smgr_ao {
 	void			(*smgr_create_ao) (RelFileLocatorBackend rnode, int32 segmentFileNum, bool isRedo);
-	off_t			(*smgr_FileDiskSize) (File file);
+	int64			(*smgr_FileDiskSize) (File file);
 	void			(*smgr_FileClose) (File file);
 	int				(*smgr_FileTruncate) (File file, int64 offset, uint32 wait_event_info);
 	File			(*smgr_AORelOpenSegFile) (Oid reloid, const char *filePath, int fileFlags);
