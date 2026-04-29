@@ -261,6 +261,7 @@ break is not needed in a wider output rendering.
   &fdwhandler;
   &tablesample-method;
   &custom-scan;
+  &custom-stats;
   &geqo;
   &tableam;
   &indexam;

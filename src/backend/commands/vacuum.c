@@ -139,6 +139,9 @@ pg_atomic_uint32 *VacuumSharedCostBalance = NULL;
 pg_atomic_uint32 *VacuumActiveNWorkers = NULL;
 int			VacuumCostBalanceLocal = 0;
 
+/* Cumulative storage to report total vacuum delay time (msec). */
+double		VacuumDelayTime = 0;
+
 /* non-export function prototypes */
 static List *expand_vacuum_rel(VacuumRelation *vrel,
 							   MemoryContext vac_context, int options);
@@ -3239,6 +3242,7 @@ vacuum_delay_point(void)
 			exit(1);
 
 		VacuumCostBalance = 0;
+		VacuumDelayTime += msec;
 
 		/*
 		 * Balance and update limit values for autovacuum workers. We must do

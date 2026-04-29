@@ -274,6 +274,46 @@ pgstat_report_vacuum(Oid tableoid, bool shared,
 }
 
 /*
+ * Hook for extensions to receive extended vacuum statistics.
+ * NULL when no extension has registered.
+ */
+set_report_vacuum_hook_type set_report_vacuum_hook = NULL;
+
+/*
+ * Report extended vacuum statistics to extensions via set_report_vacuum_hook.
+ * The first four args are forwarded to pgstat_report_vacuum() for the heap
+ * case; for indexes pass livetuples=-1, deadtuples=-1, starttime=0 to skip
+ * the per-table cumulative-stats update.
+ *
+ * starttime is currently unused on cloudberry (PG16's pgstat_report_vacuum
+ * doesn't accept a starttime — it calls GetCurrentTimestamp() internally),
+ * but we keep it in the signature for source compatibility with extensions
+ * written against the upstream v39 patch.
+ */
+void
+pgstat_report_vacuum_ext(Relation rel, PgStat_Counter livetuples,
+						 PgStat_Counter deadtuples, TimestampTz starttime,
+						 PgStat_VacuumRelationCounts *extstats)
+{
+	(void) starttime;
+
+	/*
+	 * For heap relations the caller passes real live/dead estimates; for
+	 * index reports it passes -1/-1 to mean "don't touch the cumulative
+	 * relation entry". Honour that contract.
+	 */
+	if (livetuples >= 0 && deadtuples >= 0)
+		pgstat_report_vacuum(RelationGetRelid(rel),
+							 rel->rd_rel->relisshared,
+							 livetuples, deadtuples);
+
+	if (extstats != NULL && set_report_vacuum_hook)
+		(*set_report_vacuum_hook) (RelationGetRelid(rel),
+								   rel->rd_rel->relisshared,
+								   extstats);
+}
+
+/*
  * Report that the table was just analyzed and flush IO statistics.
  *
  * Caller must provide new live- and dead-tuples estimates, as well as a

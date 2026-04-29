@@ -1,0 +1,864 @@
+<!-- doc/src/sgml/extvacuumstatistics.sgml -->
+
+<sect1 id="extvacuumstatistics" xreflabel="ext_vacuum_statistics">
+ <title>ext_vacuum_statistics &mdash; extended per-vacuum statistics</title>
+
+ <indexterm zone="extvacuumstatistics">
+  <primary>ext_vacuum_statistics</primary>
+ </indexterm>
+
+ <para>
+  The <filename>ext_vacuum_statistics</filename> module collects detailed
+  per-table, per-index, and per-database statistics about every
+  <command>VACUUM</command> operation, exposing them through views in the
+  <literal>ext_vacuum_statistics</literal> schema. Counters cover buffer I/O
+  (read/hit/dirtied/written and timings), WAL volume, page accounting from
+  the visibility map, dead-tuple bookkeeping, anti-wraparound failsafe
+  invocations, and overall wall-clock / sleep time.
+ </para>
+
+ <para>
+  Core <productname>PostgreSQL</productname> only emits the
+  <function>set_report_vacuum_hook</function> callback inside lazy vacuum;
+  this extension installs that callback and is the sole owner of the
+  persisted data. It is intentional that the extension does not force
+  <quote>collect everything</quote>: both the set of objects to track
+  <emphasis>and</emphasis> the categories of metrics to keep can be
+  configured at run time, so memory and overhead can be tuned to the actual
+  monitoring need.
+ </para>
+
+ <sect2 id="extvacuumstatistics-loading">
+  <title>Loading the module</title>
+
+  <para>
+   The module must be loaded by adding
+   <literal>ext_vacuum_statistics</literal> to
+   <xref linkend="guc-shared-preload-libraries"/> in
+   <filename>postgresql.conf</filename>, because it registers a vacuum hook
+   and a custom cumulative-statistics kind at server startup. A server
+   restart is required.
+  </para>
+
+<programlisting>
+shared_preload_libraries = 'ext_vacuum_statistics'
+</programlisting>
+
+  <para>
+   In each database where the views should be visible:
+  </para>
+
+<programlisting>
+CREATE EXTENSION ext_vacuum_statistics;
+</programlisting>
+ </sect2>
+
+ <sect2 id="extvacuumstatistics-config">
+  <title>Configuration parameters</title>
+
+  <variablelist>
+   <varlistentry>
+    <term><varname>vacuum_statistics.enabled</varname> (<type>boolean</type>)</term>
+    <listitem>
+     <para>
+      Master switch. When <literal>off</literal>, the hook returns early and
+      no counters are accumulated. Default <literal>on</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><varname>vacuum_statistics.object_types</varname> (<type>string</type>)</term>
+    <listitem>
+     <para>
+      Selects which object kinds receive entries:
+      <literal>all</literal> (databases plus relations &mdash; the default),
+      <literal>databases</literal> (per-database aggregates only), or
+      <literal>relations</literal> (per-table and per-index entries; no
+      database-level aggregate).
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><varname>vacuum_statistics.track_relations</varname> (<type>string</type>)</term>
+    <listitem>
+     <para>
+      When relations are tracked, narrow the set further:
+      <literal>all</literal> (default), <literal>system</literal>
+      (only catalogs &mdash; <function>IsCatalogRelationOid()</function>
+      returns true), or <literal>user</literal> (everything else). Has no
+      effect when <varname>object_types</varname> is
+      <literal>databases</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><varname>vacuum_statistics.track_databases_from_list</varname> (<type>boolean</type>)</term>
+    <listitem>
+     <para>
+      When <literal>on</literal>, track only databases whose OID was
+      registered via <function>add_track_database()</function>. Default
+      <literal>off</literal> (governed by
+      <varname>object_types</varname>).
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><varname>vacuum_statistics.track_relations_from_list</varname> (<type>boolean</type>)</term>
+    <listitem>
+     <para>
+      When <literal>on</literal>, track only relations whose
+      <literal>(dboid, reloid)</literal> pair was registered via
+      <function>add_track_relation()</function>; <literal>dboid = 0</literal>
+      is a wildcard that matches the relation in any database. Default
+      <literal>off</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><varname>vacuum_statistics.collect</varname> (<type>string</type>)</term>
+    <listitem>
+     <para>
+      Comma- or whitespace-separated list of metric categories to
+      accumulate: <literal>buffers</literal>, <literal>wal</literal>,
+      <literal>general</literal>, <literal>timing</literal>, or
+      <literal>all</literal> (the default). Categories not listed are
+      skipped on the hook side and never reach shared memory, which keeps
+      the cost of the handler lower when only a slice of the metrics is
+      interesting.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+
+  <para>
+   All parameters have <literal>SUSET</literal> context: superusers may
+   change them per-session, or globally via
+   <command>ALTER SYSTEM</command> / <filename>postgresql.conf</filename>.
+   None of them require a restart.
+  </para>
+ </sect2>
+
+ <sect2 id="extvacuumstatistics-filtering">
+  <title>Filtering: which objects get tracked</title>
+
+  <para>
+   This is where the main flexibility lives &mdash; the extension does not
+   force <quote>collect everything</quote>, but lets you choose both
+   <emphasis>what</emphasis> to track and <emphasis>which metrics</emphasis>
+   to keep. Three filters are evaluated in order; an entry must pass all
+   three.
+  </para>
+
+  <sect3 id="extvacuumstatistics-filter-object">
+   <title>By object type</title>
+
+   <para>
+    You can limit collection to databases only (without per-table detail),
+    to relations only, or collect both (the default). Among relations, you
+    can additionally filter <literal>system</literal> /
+    <literal>user</literal> / <literal>all</literal>. The relation filter
+    applies uniformly to tables and their indexes &mdash; the two cannot
+    be filtered independently.
+   </para>
+
+<programlisting>
+-- per-database aggregates only (smallest footprint)
+SET vacuum_statistics.object_types = 'databases';
+
+-- only user tables and their indexes
+SET vacuum_statistics.object_types = 'relations';
+SET vacuum_statistics.track_relations = 'user';
+
+-- only system catalogs
+SET vacuum_statistics.track_relations = 'system';
+</programlisting>
+  </sect3>
+
+  <sect3 id="extvacuumstatistics-filter-list">
+   <title>By an explicit list</title>
+
+   <para>
+    An alternative to <quote>by type</quote> is a whitelist: turn the
+    corresponding mode on, and the extension starts collecting statistics
+    only for the databases and tables that were explicitly registered via
+    <function>add_track_database()</function> /
+    <function>add_track_relation()</function> (with matching
+    <function>remove_track_*</function> for removal). When the lists are
+    off, the type filter is in effect; when they are on, only the list
+    applies. This is convenient when you are interested in monitoring
+    specific <quote>hot</quote> tables and do not want to spend memory on
+    statistics for everything else.
+   </para>
+
+   <para>
+    The list is persisted to disk as
+    <filename>pg_stat/ext_vacuum_statistics_track.oid</filename>, so the
+    selection survives restart. Concurrency is handled carefully:
+    <function>add_track_*</function> may be called from multiple sessions,
+    plus an <symbol>object_access_hook</symbol> cleans an entry on
+    <command>DROP</command>. To avoid a torn file, access to the list is
+    serialized via a dedicated <literal>LWLock</literal> tranche
+    (requested from a <symbol>shmem_request_hook</symbol>), and the file
+    itself is written atomically &mdash; first to a temporary file, then
+    <function>fflush</function> + <function>pg_fsync</function> +
+    <function>durable_rename</function>. All I/O return codes are checked;
+    on error the temporary file is removed and the real one is left
+    untouched, and a <literal>PG_TRY</literal>/<literal>PG_CATCH</literal>
+    pair guarantees cleanup if <function>ereport(ERROR)</function> fires
+    mid-write. Reads take the same lock in shared mode so a concurrent
+    write cannot tear the load.
+   </para>
+
+<programlisting>
+-- enable list-based filtering
+SET vacuum_statistics.track_databases_from_list = on;
+SET vacuum_statistics.track_relations_from_list = on;
+
+-- pick what we care about
+SELECT ext_vacuum_statistics.add_track_database(
+    (SELECT oid FROM pg_database WHERE datname = current_database()));
+SELECT ext_vacuum_statistics.add_track_relation(
+    (SELECT oid FROM pg_database WHERE datname = current_database()),
+    'public.mytable'::regclass);
+
+-- inspect
+SELECT * FROM ext_vacuum_statistics.track_list();
+
+-- remove
+SELECT ext_vacuum_statistics.remove_track_relation(0, 'public.mytable'::regclass);
+SELECT ext_vacuum_statistics.remove_track_database(
+    (SELECT oid FROM pg_database WHERE datname = current_database()));
+</programlisting>
+
+   <para>
+    Passing <literal>0</literal> for <parameter>dboid</parameter> in
+    <function>add_track_relation()</function> registers the relation for
+    <emphasis>any</emphasis> database with that OID.
+   </para>
+  </sect3>
+
+  <sect3 id="extvacuumstatistics-filter-metric">
+   <title>By metric category</title>
+
+   <para>
+    Orthogonal to the object filters,
+    <varname>vacuum_statistics.collect</varname> takes a list and turns on
+    the categories of interest &mdash; buffers, WAL, general counters, or
+    timings (or <literal>all</literal>). Unwanted categories are simply
+    skipped on the hook handler side and never make it into the
+    <literal>pgstat</literal> entry, which reduces the overhead of the
+    handler itself. This is useful when, for example, only timings are
+    needed: in that case the extension does not waste cycles copying the
+    buffer and WAL fields.
+   </para>
+
+<programlisting>
+-- only WAL and timing counters; skip buffer/general bookkeeping
+SET vacuum_statistics.collect = 'wal, timing';
+</programlisting>
+  </sect3>
+ </sect2>
+
+ <sect2 id="extvacuumstatistics-functions">
+  <title>Functions</title>
+
+  <variablelist>
+   <varlistentry>
+    <term>
+     <function>ext_vacuum_statistics.add_track_database(dboid <type>oid</type>)</function>
+     <returnvalue>void</returnvalue>
+    </term>
+    <listitem>
+     <para>
+      Append <parameter>dboid</parameter> to the database whitelist
+      persisted in
+      <filename>pg_stat/ext_vacuum_statistics_track.oid</filename>. Has no
+      effect on its own &mdash; arm the filter with
+      <varname>vacuum_statistics.track_databases_from_list = on</varname>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>ext_vacuum_statistics.remove_track_database(dboid <type>oid</type>)</function>
+     <returnvalue>void</returnvalue>
+    </term>
+    <listitem>
+     <para>
+      Remove a previously added database from the whitelist. Idempotent
+      &mdash; absent OIDs are silently ignored.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>ext_vacuum_statistics.add_track_relation(dboid <type>oid</type>, reloid <type>oid</type>)</function>
+     <returnvalue>void</returnvalue>
+    </term>
+    <listitem>
+     <para>
+      Append <literal>(dboid, reloid)</literal> to the relation whitelist.
+      <literal>dboid = 0</literal> is a wildcard matching any database.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>ext_vacuum_statistics.remove_track_relation(dboid <type>oid</type>, reloid <type>oid</type>)</function>
+     <returnvalue>void</returnvalue>
+    </term>
+    <listitem>
+     <para>
+      Remove a previously added relation from the whitelist. The
+      <symbol>object_access_hook</symbol> also removes entries
+      automatically when the relation is dropped.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>ext_vacuum_statistics.track_list()</function>
+     <returnvalue>setof record</returnvalue> (<literal>track_kind text, dboid oid, reloid oid</literal>)
+    </term>
+    <listitem>
+     <para>
+      Return the current whitelist contents. <literal>track_kind</literal>
+      is <literal>database</literal> or <literal>relation</literal>;
+      <literal>dboid</literal> or <literal>reloid</literal> may be NULL for
+      cluster-wide entries.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>ext_vacuum_statistics.vacuum_statistics_reset()</function>
+     <returnvalue>void</returnvalue>
+    </term>
+    <listitem>
+     <para>
+      Reset every counter in both the per-relation and per-database
+      cumulative-stats kinds owned by the extension. The whitelist
+      <emphasis>is not</emphasis> touched by this call.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>ext_vacuum_statistics.shared_memory_size()</function>
+     <returnvalue>bigint</returnvalue>
+    </term>
+    <listitem>
+     <para>
+      Return the total amount of shared memory (in bytes) currently used
+      by entries the extension manages. Useful for capacity planning.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
+
+ <sect2 id="extvacuumstatistics-privileges">
+  <title>Privileges</title>
+
+  <para>
+   The whitelist mutators &mdash;
+   <function>add_track_database()</function>,
+   <function>remove_track_database()</function>,
+   <function>add_track_relation()</function>,
+   <function>remove_track_relation()</function> &mdash; require either
+   superuser, or membership in the
+   <literal>pg_read_all_stats</literal> role. At the SQL level
+   <literal>EXECUTE</literal> is revoked from
+   <literal>PUBLIC</literal> and granted only to
+   <literal>pg_read_all_stats</literal>, so a regular user has no path to
+   mutate the list. Reading the views and calling
+   <function>track_list()</function> /
+   <function>shared_memory_size()</function> /
+   <function>vacuum_statistics_reset()</function> follow standard
+   <productname>PostgreSQL</productname> permissions, like the regular
+   statistics views.
+  </para>
+ </sect2>
+
+ <sect2 id="extvacuumstatistics-view-database">
+  <title>The <structname>pg_stats_vacuum_database</structname> view</title>
+
+  <indexterm zone="extvacuumstatistics-view-database">
+   <primary>pg_stats_vacuum_database</primary>
+  </indexterm>
+
+  <para>
+   The view <structname>pg_stats_vacuum_database</structname> contains one
+   row for each database in the cluster for which at least one vacuum has
+   completed since the extension was loaded (or the counters were reset).
+   Columns aggregate the per-table and per-index numbers; reltype-specific
+   counters (<structfield>pages_*</structfield>, <structfield>tuples_*</structfield>)
+   are not summed at the database level.
+  </para>
+
+  <table>
+   <title><structname>pg_stats_vacuum_database</structname> Columns</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>dbid</structfield> <type>oid</type>
+      </para>
+      <para>OID of the database</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_blks_read</structfield> <type>int8</type>
+      </para>
+      <para>Number of database blocks read by vacuum operations performed on this database</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_blks_hit</structfield> <type>int8</type>
+      </para>
+      <para>Number of times database blocks were found in the buffer cache by vacuum operations performed on this database</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_blks_dirtied</structfield> <type>int8</type>
+      </para>
+      <para>Number of database blocks dirtied by vacuum operations performed on this database</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_blks_written</structfield> <type>int8</type>
+      </para>
+      <para>Number of database blocks written by vacuum operations performed on this database</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wal_records</structfield> <type>int8</type>
+      </para>
+      <para>Total number of WAL records generated by vacuum operations performed on this database</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wal_fpi</structfield> <type>int8</type>
+      </para>
+      <para>Total number of WAL full page images generated by vacuum operations performed on this database</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wal_bytes</structfield> <type>numeric</type>
+      </para>
+      <para>Total amount of WAL bytes generated by vacuum operations performed on this database</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>blk_read_time</structfield> <type>float8</type>
+      </para>
+      <para>Time spent reading database blocks by vacuum operations performed on this database, in milliseconds (only when <xref linkend="guc-track-io-timing"/> is enabled, otherwise zero)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>blk_write_time</structfield> <type>float8</type>
+      </para>
+      <para>Time spent writing database blocks by vacuum operations performed on this database, in milliseconds (only when <xref linkend="guc-track-io-timing"/> is enabled, otherwise zero)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>delay_time</structfield> <type>float8</type>
+      </para>
+      <para>Time spent sleeping in a vacuum delay point, in milliseconds (see <xref linkend="runtime-config-resource-vacuum-cost"/>)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_time</structfield> <type>float8</type>
+      </para>
+      <para>Total wall-clock time of vacuuming relations in this database, in milliseconds. Includes idle time spent in I/O and lock waits.</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wraparound_failsafe_count</structfield> <type>int4</type>
+      </para>
+      <para>Number of urgent anti-wraparound vacuum cycles triggered while vacuuming relations in this database</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>errors</structfield> <type>int4</type>
+      </para>
+      <para>Number of vacuum operations on this database that ended with an error</para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect2>
+
+ <sect2 id="extvacuumstatistics-view-tables">
+  <title>The <structname>pg_stats_vacuum_tables</structname> view</title>
+
+  <indexterm zone="extvacuumstatistics-view-tables">
+   <primary>pg_stats_vacuum_tables</primary>
+  </indexterm>
+
+  <para>
+   The view <structname>pg_stats_vacuum_tables</structname> contains one
+   row for each table in the current database (including TOAST tables)
+   that has been vacuumed since the extension was loaded. Buffer/WAL/time
+   columns include work done while vacuuming this table's indexes;
+   reltype-specific table counters (pages and tuple counters below) cover
+   the heap only.
+  </para>
+
+  <table>
+   <title><structname>pg_stats_vacuum_tables</structname> Columns</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relid</structfield> <type>oid</type>
+      </para>
+      <para>OID of the table</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>schemaname</structfield> <type>name</type>
+      </para>
+      <para>Name of the schema this table is in</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relname</structfield> <type>name</type>
+      </para>
+      <para>Name of this table</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_blks_read</structfield> <type>int8</type>
+      </para>
+      <para>Number of database blocks read by vacuum operations performed on this table (heap + indexes)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_blks_hit</structfield> <type>int8</type>
+      </para>
+      <para>Number of times database blocks were found in the buffer cache by vacuum operations performed on this table (heap + indexes)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_blks_dirtied</structfield> <type>int8</type>
+      </para>
+      <para>Number of database blocks dirtied by vacuum operations on this table</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_blks_written</structfield> <type>int8</type>
+      </para>
+      <para>Number of database blocks written by vacuum operations on this table</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>rel_blks_read</structfield> <type>int8</type>
+      </para>
+      <para>Number of blocks vacuum operations read directly from this table's relation files</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>rel_blks_hit</structfield> <type>int8</type>
+      </para>
+      <para>Number of times blocks of this table were already in the buffer cache when vacuum needed them (so no read was issued)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>pages_scanned</structfield> <type>int8</type>
+      </para>
+      <para>Number of heap pages examined by vacuum (i.e., not skipped via the visibility map)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>pages_removed</structfield> <type>int8</type>
+      </para>
+      <para>Number of heap pages physically removed by vacuum truncation (relation storage shrink)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>vm_new_frozen_pages</structfield> <type>int8</type>
+      </para>
+      <para>Number of pages newly marked all-frozen in the visibility map by vacuum</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>vm_new_visible_pages</structfield> <type>int8</type>
+      </para>
+      <para>Number of pages newly marked all-visible in the visibility map by vacuum (without all-frozen)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>vm_new_visible_frozen_pages</structfield> <type>int8</type>
+      </para>
+      <para>Number of pages newly marked all-visible <emphasis>and</emphasis> all-frozen in one step</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>tuples_deleted</structfield> <type>int8</type>
+      </para>
+      <para>Number of dead tuples vacuum removed from this table</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>tuples_frozen</structfield> <type>int8</type>
+      </para>
+      <para>Number of tuples vacuum marked frozen</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>recently_dead_tuples</structfield> <type>int8</type>
+      </para>
+      <para>Dead tuples vacuum left in place because they are still visible to some open transaction</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>missed_dead_tuples</structfield> <type>int8</type>
+      </para>
+      <para>Fully DEAD tuples that vacuum could not prune due to a failure to acquire a cleanup lock on the heap page</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>missed_dead_pages</structfield> <type>int8</type>
+      </para>
+      <para>Number of pages that contained at least one <structfield>missed_dead_tuples</structfield></para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>index_vacuum_count</structfield> <type>int8</type>
+      </para>
+      <para>Number of times indexes on this table were processed during the vacuum</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wraparound_failsafe_count</structfield> <type>int4</type>
+      </para>
+      <para>Number of urgent anti-wraparound vacuum cycles triggered for this table</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wal_records</structfield> <type>int8</type>
+      </para>
+      <para>Total number of WAL records generated by vacuum operations on this table</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wal_fpi</structfield> <type>int8</type>
+      </para>
+      <para>Total number of WAL full page images generated by vacuum operations on this table</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wal_bytes</structfield> <type>numeric</type>
+      </para>
+      <para>Total amount of WAL bytes generated by vacuum operations on this table</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>blk_read_time</structfield> <type>float8</type>
+      </para>
+      <para>Time spent reading database blocks by vacuum operations on this table, in milliseconds (only when <xref linkend="guc-track-io-timing"/> is enabled)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>blk_write_time</structfield> <type>float8</type>
+      </para>
+      <para>Time spent writing database blocks by vacuum operations on this table, in milliseconds (only when <xref linkend="guc-track-io-timing"/> is enabled)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>delay_time</structfield> <type>float8</type>
+      </para>
+      <para>Time spent sleeping in a vacuum delay point while vacuuming this table, in milliseconds</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_time</structfield> <type>float8</type>
+      </para>
+      <para>Total wall-clock time spent vacuuming this table (heap + indexes + waits), in milliseconds</para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect2>
+
+ <sect2 id="extvacuumstatistics-view-indexes">
+  <title>The <structname>pg_stats_vacuum_indexes</structname> view</title>
+
+  <indexterm zone="extvacuumstatistics-view-indexes">
+   <primary>pg_stats_vacuum_indexes</primary>
+  </indexterm>
+
+  <para>
+   The view <structname>pg_stats_vacuum_indexes</structname> contains one
+   row per index that has been touched by vacuum since the extension was
+   loaded (TOAST indexes included). Buffer/WAL/time counters cover only
+   the index work itself, not the parent heap.
+  </para>
+
+  <table>
+   <title><structname>pg_stats_vacuum_indexes</structname> Columns</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       Column Type
+      </para>
+      <para>
+       Description
+      </para></entry>
+     </row>
+    </thead>
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relid</structfield> <type>oid</type>
+      </para>
+      <para>OID of the index</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>schemaname</structfield> <type>name</type>
+      </para>
+      <para>Name of the schema this index is in</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>relname</structfield> <type>name</type>
+      </para>
+      <para>Name of this index</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_blks_read</structfield> <type>int8</type>
+      </para>
+      <para>Number of database blocks read by vacuum operations on this index</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_blks_hit</structfield> <type>int8</type>
+      </para>
+      <para>Number of times database blocks were found in the buffer cache by vacuum operations on this index</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_blks_dirtied</structfield> <type>int8</type>
+      </para>
+      <para>Number of database blocks dirtied by vacuum operations on this index</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_blks_written</structfield> <type>int8</type>
+      </para>
+      <para>Number of database blocks written by vacuum operations on this index</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>rel_blks_read</structfield> <type>int8</type>
+      </para>
+      <para>Number of blocks vacuum operations read directly from this index's relation files</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>rel_blks_hit</structfield> <type>int8</type>
+      </para>
+      <para>Number of times blocks of this index were already in the buffer cache when vacuum needed them</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>pages_deleted</structfield> <type>int8</type>
+      </para>
+      <para>Number of pages marked deleted by vacuum (free space within the index file; the file size may not change)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>tuples_deleted</structfield> <type>int8</type>
+      </para>
+      <para>Number of dead tuples vacuum removed from this index</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wal_records</structfield> <type>int8</type>
+      </para>
+      <para>Total number of WAL records generated by vacuum operations on this index</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wal_fpi</structfield> <type>int8</type>
+      </para>
+      <para>Total number of WAL full page images generated by vacuum operations on this index</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>wal_bytes</structfield> <type>numeric</type>
+      </para>
+      <para>Total amount of WAL bytes generated by vacuum operations on this index</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>blk_read_time</structfield> <type>float8</type>
+      </para>
+      <para>Time spent reading database blocks by vacuum operations on this index, in milliseconds (only when <xref linkend="guc-track-io-timing"/> is enabled)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>blk_write_time</structfield> <type>float8</type>
+      </para>
+      <para>Time spent writing database blocks by vacuum operations on this index, in milliseconds (only when <xref linkend="guc-track-io-timing"/> is enabled)</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>delay_time</structfield> <type>float8</type>
+      </para>
+      <para>Time spent sleeping in a vacuum delay point while vacuuming this index, in milliseconds</para></entry>
+     </row>
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>total_time</structfield> <type>float8</type>
+      </para>
+      <para>Total wall-clock time spent vacuuming this index, in milliseconds</para></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect2>
+
+ <sect2 id="extvacuumstatistics-author">
+  <title>Author</title>
+  <para>
+   Alena Rybakina, Andrei Lepikhov, Andrei Zubkov.
+  </para>
+ </sect2>
+
+</sect1>
