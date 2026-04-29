@@ -701,7 +701,9 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_vacuum_count(C.oid) AS vacuum_count,
             pg_stat_get_autovacuum_count(C.oid) AS autovacuum_count,
             pg_stat_get_analyze_count(C.oid) AS analyze_count,
-            pg_stat_get_autoanalyze_count(C.oid) AS autoanalyze_count
+            pg_stat_get_autoanalyze_count(C.oid) AS autoanalyze_count,
+            pg_stat_get_visible_page_marks_cleared(C.oid) AS visible_page_marks_cleared,
+            pg_stat_get_frozen_page_marks_cleared(C.oid) AS frozen_page_marks_cleared
     FROM pg_class C LEFT JOIN
          pg_index I ON C.oid = I.indrelid
          LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)

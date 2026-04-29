@@ -120,6 +120,12 @@ PG_STAT_GET_RELENTRY_INT64(tuples_updated)
 /* pg_stat_get_vacuum_count */
 PG_STAT_GET_RELENTRY_INT64(vacuum_count)
 
+/* pg_stat_get_visible_page_marks_cleared */
+PG_STAT_GET_RELENTRY_INT64(visible_page_marks_cleared)
+
+/* pg_stat_get_frozen_page_marks_cleared */
+PG_STAT_GET_RELENTRY_INT64(frozen_page_marks_cleared)
+
 #define PG_STAT_GET_RELENTRY_TIMESTAMPTZ(stat)					\
 Datum															\
 CppConcat(pg_stat_get_,stat)(PG_FUNCTION_ARGS)					\

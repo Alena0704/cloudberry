@@ -180,6 +180,8 @@ typedef struct PgStat_TableCounts
 
 	PgStat_Counter blocks_fetched;
 	PgStat_Counter blocks_hit;
+	PgStat_Counter visible_page_marks_cleared;
+	PgStat_Counter frozen_page_marks_cleared;
 } PgStat_TableCounts;
 
 /* ----------
@@ -238,7 +240,7 @@ typedef struct PgStat_TableXactStatus
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCAD
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCAE
 
 typedef struct PgStat_ArchiverStats
 {
@@ -418,6 +420,8 @@ typedef struct PgStat_StatTabEntry
 
 	PgStat_Counter blocks_fetched;
 	PgStat_Counter blocks_hit;
+	PgStat_Counter visible_page_marks_cleared;
+	PgStat_Counter frozen_page_marks_cleared;
 
 	TimestampTz last_vacuum_time;	/* user initiated vacuum */
 	PgStat_Counter vacuum_count;
@@ -701,6 +705,17 @@ extern void pgstat_report_analyze(Relation rel,
 	do {															\
 		if (pgstat_should_count_relation(rel))						\
 			(rel)->pgstat_info->counts.blocks_hit++;				\
+	} while (0)
+/* count revocations of all-visible and all-frozen marks in visibility map */
+#define pgstat_count_visible_page_marks_cleared(rel)					\
+	do {															\
+		if (pgstat_should_count_relation(rel))						\
+			(rel)->pgstat_info->counts.visible_page_marks_cleared++;	\
+	} while (0)
+#define pgstat_count_frozen_page_marks_cleared(rel)					\
+	do {															\
+		if (pgstat_should_count_relation(rel))						\
+			(rel)->pgstat_info->counts.frozen_page_marks_cleared++;	\
 	} while (0)
 
 extern void pgstat_count_heap_insert(Relation rel, PgStat_Counter n);

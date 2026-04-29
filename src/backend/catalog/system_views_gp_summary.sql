@@ -148,7 +148,9 @@ FROM
          max(vacuum_count) as vacuum_count,
          max(autovacuum_count) as autovacuum_count,
          max(analyze_count) as analyze_count,
-         max(autoanalyze_count) as autoanalyze_count
+         max(autoanalyze_count) as autoanalyze_count,
+         case when d.policytype = 'r' then (sum(visible_page_marks_cleared)/d.numsegments)::bigint else sum(visible_page_marks_cleared) end visible_page_marks_cleared,
+         case when d.policytype = 'r' then (sum(frozen_page_marks_cleared)/d.numsegments)::bigint else sum(frozen_page_marks_cleared) end frozen_page_marks_cleared
      FROM
          gp_dist_random('pg_stat_all_tables') allt
          inner join pg_class c
