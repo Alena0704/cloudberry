@@ -1,0 +1,488 @@
+<!-- doc/src/sgml/custom-stats.sgml -->
+
+<chapter id="custom-stats">
+ <title>Custom Cumulative Statistics</title>
+
+ <indexterm zone="custom-stats">
+  <primary>custom cumulative statistics</primary>
+ </indexterm>
+
+ <indexterm zone="custom-stats">
+  <primary>statistics</primary>
+  <secondary>extending the cumulative statistics system</secondary>
+ </indexterm>
+
+ <para>
+  <productname>Apache Cloudberry</productname> exposes a registration entry
+  point that lets extensions add their own kinds to the cumulative
+  statistics system on top of the built-in kinds (database, relation,
+  function, replication-slot, subscription, archiver, bgwriter,
+  checkpointer, IO, SLRU, WAL, resource queue). A custom kind owns
+  shared-memory hash entries identified by the same <type>(kind, dboid,
+  objid)</type> key the built-in kinds use, participates in
+  <function>pg_stat_have_stats</function> and
+  <function>pg_stat_reset_*</function> automatically, and is read with
+  the same <function>pgstat_fetch_entry</function> /
+  <function>pgstat_get_entry_ref_locked</function> primitives as core.
+ </para>
+
+ <para>
+  The API is a backport of <productname>PostgreSQL</productname> 18's
+  <quote>Make stats reporting extensible</quote> change (commit
+  <literal>f98dbdeb51</literal>); modules written against upstream PG 18+
+  can be ported to <productname>Apache Cloudberry</productname> with no
+  source changes by including the <filename>utils/pgstat_kind.h</filename>
+  compatibility header.
+ </para>
+
+ <sect1 id="custom-stats-overview">
+  <title>Overview</title>
+
+  <para>
+   Custom kinds are designed for the same workload the built-in cumulative
+   statistics serve: low-volume, write-mostly counters that need to be
+   visible cluster-wide and survive across sessions but not across
+   crashes.
+  </para>
+
+  <para>
+   For workloads that need every-call/every-row instrumentation
+   (per-statement timing, per-row sampling) the cumulative statistics
+   system is the wrong layer; use a hook + ring buffer or
+   <filename>pg_stat_statements</filename>-style hashtable instead.
+  </para>
+ </sect1>
+
+ <sect1 id="custom-stats-limitations">
+  <title>Limitations and Constraints</title>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     <emphasis>Registration is process-local.</emphasis> Each backend
+     populates its own table of custom kinds during startup. To stay
+     consistent across the cluster, the module must be loaded via
+     <xref linkend="guc-shared-preload-libraries"/>; calls to
+     <function>pgstat_register_kind</function> outside
+     <symbol>process_shared_preload_libraries_in_progress</symbol>
+     raise an error.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>Reserved ID range.</emphasis> Custom kinds use IDs
+     <literal>PGSTAT_KIND_CUSTOM_MIN .. PGSTAT_KIND_CUSTOM_MAX</literal>
+     (currently 24..31, eight slots). Built-in kinds occupy
+     <literal>PGSTAT_KIND_BUILTIN_MIN .. PGSTAT_KIND_BUILTIN_MAX</literal>
+     and are off-limits; the gap between the ranges is reserved for
+     future built-in additions and must not be used by extensions.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>No persistence across postmaster restarts.</emphasis>
+     The on-disk stats file format only persists built-in kinds in this
+     port. Custom-kind entries live in the shared-memory hash for the
+     lifetime of the postmaster and start empty after every restart.
+     Extensions that need durable counters must serialize them
+     themselves (file in <varname>$PGDATA/pg_stat/</varname> with an
+     atomic-rename pattern is the conventional choice).
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>One <type>PgStat_KindInfo</type> per kind, valid for the
+     life of the process.</emphasis>
+     <function>pgstat_register_kind</function> stores a pointer to the
+     supplied descriptor; the storage must remain valid until process
+     exit. The usual pattern is a <literal>static const</literal> in the
+     module's source file.
+    </para>
+   </listitem>
+  </itemizedlist>
+ </sect1>
+
+ <sect1 id="custom-stats-defining-kind">
+  <title>Defining a Custom Kind</title>
+
+  <para>
+   A custom kind is described by <type>PgStat_KindInfo</type> declared in
+   <filename>utils/pgstat_internal.h</filename>. The structure carries
+   sizing information, persistence flags, and pointers to optional
+   callbacks. The fields most modules need are:
+  </para>
+
+  <variablelist>
+   <varlistentry>
+    <term><structfield>name</structfield> <type>(const char *)</type></term>
+    <listitem>
+     <para>Short identifier &mdash; appears in
+     <function>pg_stat_have_stats('<replaceable>name</replaceable>',
+     ...)</function> and in error messages. Must be non-empty and
+     unique across all registered kinds.</para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><structfield>fixed_amount</structfield> <type>(bool)</type></term>
+    <listitem>
+     <para><literal>false</literal> for kinds with one entry per
+     object (relation, database, custom OID); <literal>true</literal>
+     for cluster-wide singletons (archiver, WAL).
+     <literal>fixed_amount = true</literal> requires
+     <structfield>snapshot_cb</structfield> and
+     <structfield>reset_all_cb</structfield>.</para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><structfield>accessed_across_databases</structfield> <type>(bool)</type></term>
+    <listitem>
+     <para>Set to <literal>true</literal> when entries should be
+     visible from any database (rather than only from the database
+     whose OID matches <literal>key.dboid</literal>). Database-level
+     aggregates and cluster-wide objects use this.</para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <structfield>shared_size</structfield>,
+     <structfield>shared_data_off</structfield>,
+     <structfield>shared_data_len</structfield>
+     <type>(uint32)</type>
+    </term>
+    <listitem>
+     <para>Total size of one shared-memory entry (header +
+     payload), the offset of the payload within that entry, and the
+     payload size. The header is always
+     <type>PgStatShared_Common</type>; embed it as the first field of
+     your shared struct so the offsets line up.</para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><structfield>pending_size</structfield> <type>(uint32)</type></term>
+    <listitem>
+     <para>Size of the optional per-backend pending buffer, or 0 if
+     the kind writes shared memory directly.</para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><structfield>flush_pending_cb</structfield> <type>(callback)</type></term>
+    <listitem>
+     <para>Required when <structfield>pending_size</structfield>
+     &gt; 0. Invoked from
+     <function>pgstat_report_stat()</function> to merge the
+     backend-local pending entry into the shared entry.</para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <structfield>delete_pending_cb</structfield>,
+     <structfield>reset_timestamp_cb</structfield>,
+     <structfield>to_serialized_name</structfield>,
+     <structfield>from_serialized_name</structfield>,
+     <structfield>reset_all_cb</structfield>,
+     <structfield>snapshot_cb</structfield>
+     <type>(callbacks)</type>
+    </term>
+    <listitem>
+     <para>Optional hooks for advanced lifecycle events (drop
+     pending, reset timestamp, name-keyed identification on disk,
+     fixed-kind reset/snapshot). Most variable-numbered kinds need
+     none of these.</para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <structfield>write_to_file</structfield>,
+     <structfield>track_entry_count</structfield>
+     <type>(bool : 1)</type>
+    </term>
+    <listitem>
+     <para>Forward-compatibility flags reserved for future use. They
+     are accepted by the registration call so modules written against
+     <productname>PostgreSQL</productname> 18+ continue to compile;
+     in the current port they are informational. Persistence is not
+     implemented for custom kinds (see
+     <xref linkend="custom-stats-limitations"/>) and
+     <function>pgstat_get_entry_count</function> walks the shared
+     hash regardless.</para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect1>
+
+ <sect1 id="custom-stats-registering">
+  <title>Registering a Kind</title>
+
+  <para>
+   The module exposes a <type>PgStat_KindInfo</type> object and registers
+   it from <function>_PG_init</function>:
+  </para>
+
+<programlisting>
+#include "utils/pgstat_kind.h"
+#include "utils/pgstat_internal.h"
+
+typedef struct PgStatShared_MyEntry
+{
+    PgStatShared_Common header;
+    MyCounters          stats;
+}           PgStatShared_MyEntry;
+
+static const PgStat_KindInfo my_kind_info = {
+    .name              = "my_module",
+    .fixed_amount      = false,
+    .shared_size       = sizeof(PgStatShared_MyEntry),
+    .shared_data_off   = offsetof(PgStatShared_MyEntry, stats),
+    .shared_data_len   = sizeof(MyCounters),
+    .pending_size      = 0,
+    .flush_pending_cb  = NULL,
+};
+
+#define PGSTAT_KIND_MY_MODULE  (PGSTAT_KIND_CUSTOM_MIN + 0)
+
+void
+_PG_init(void)
+{
+    /* must be loaded via shared_preload_libraries */
+    pgstat_register_kind(PGSTAT_KIND_MY_MODULE, &amp;my_kind_info);
+}
+</programlisting>
+
+  <para>
+   <function>pgstat_register_kind</function> validates that the chosen
+   ID is in the custom range, that the slot is empty, that the
+   <structfield>name</structfield> is non-empty, and that the call
+   happens during shared-library preload. Successful registrations are
+   logged at <literal>LOG</literal> level so operators can confirm what
+   modules have claimed which slots.
+  </para>
+
+  <para>
+   Picking an ID is the responsibility of the module author. The
+   eight-slot range is small, so well-known modules should pick an
+   offset and document it in their README; cluster operators that
+   combine modules can resolve collisions by recompiling one of them
+   with a different offset.
+  </para>
+ </sect1>
+
+ <sect1 id="custom-stats-using">
+  <title>Reading and Writing Entries</title>
+
+  <para>
+   Once a kind is registered, entries are accessed exactly like
+   built-in kinds. Writing is done under the per-entry LWLock provided
+   by the cumulative statistics system:
+  </para>
+
+<programlisting>
+PgStat_EntryRef       *entry_ref;
+PgStatShared_MyEntry  *shentry;
+
+entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_MY_MODULE,
+                                        MyDatabaseId, my_objid,
+                                        false /* nowait */);
+
+shentry = (PgStatShared_MyEntry *) entry_ref-&gt;shared_stats;
+shentry-&gt;stats.calls++;
+shentry-&gt;stats.total_time += elapsed_ms;
+
+pgstat_unlock_entry(entry_ref);
+</programlisting>
+
+  <para>
+   Reading uses the same fetch path as core, including
+   <function>pgstat_fetch_entry</function> for snapshot-aware lookups
+   from SQL-callable functions:
+  </para>
+
+<programlisting>
+MyCounters *snap;
+
+snap = (MyCounters *)
+    pgstat_fetch_entry(PGSTAT_KIND_MY_MODULE,
+                       MyDatabaseId, my_objid);
+if (snap == NULL)
+    PG_RETURN_NULL();
+</programlisting>
+
+  <para>
+   Resetting works through the standard primitives. For a single entry:
+  </para>
+
+<programlisting>
+pgstat_reset_entry(PGSTAT_KIND_MY_MODULE, dboid, objid, GetCurrentTimestamp());
+</programlisting>
+
+  <para>
+   For all entries of the kind:
+  </para>
+
+<programlisting>
+pgstat_reset_of_kind(PGSTAT_KIND_MY_MODULE);
+</programlisting>
+
+  <para>
+   To find out how many entries of the kind currently exist in shared
+   memory (useful for capacity tracking and admin views):
+  </para>
+
+<programlisting>
+int64 n = pgstat_get_entry_count(PGSTAT_KIND_MY_MODULE);
+</programlisting>
+ </sect1>
+
+ <sect1 id="custom-stats-sql">
+  <title>SQL Surface</title>
+
+  <para>
+   <function>pg_stat_have_stats(<replaceable>kind_name</replaceable>,
+   <replaceable>dboid</replaceable>,
+   <replaceable>objid</replaceable>)</function> resolves
+   <replaceable>kind_name</replaceable> against the union of built-in
+   and registered custom names. A custom kind's SQL identity is its
+   <structfield>name</structfield> field exactly as registered:
+  </para>
+
+<programlisting>
+SELECT pg_stat_have_stats('my_module', current_database()::oid, '...'::oid);
+</programlisting>
+
+  <para>
+   <function>pg_stat_reset</function> with the kind name argument
+   targets a custom kind in the same way. Modules typically also
+   ship dedicated views and reset functions wrapping
+   <function>pgstat_fetch_entry</function> for per-object queries
+   (the schema, view names, and column shape are entirely up to the
+   module).
+  </para>
+ </sect1>
+
+ <sect1 id="custom-stats-cookbook">
+  <title>Implementation Notes</title>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     <emphasis>Concurrency.</emphasis> Each shared entry has its own
+     LWLock acquired by
+     <function>pgstat_get_entry_ref_locked</function>. Hold it as
+     briefly as possible &mdash; treat the entry like any other shared
+     memory critical section. For high-frequency updates use the
+     per-backend pending-buffer pattern (set
+     <structfield>pending_size</structfield> and provide
+     <structfield>flush_pending_cb</structfield>) so the lock is taken
+     once at flush time rather than on every increment.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>Object identity.</emphasis> The hash key is
+     <type>(kind, dboid, objid)</type>. Modules that want
+     finer-grained partitioning than a single OID typically encode a
+     compound key into <literal>objid</literal>; for example, a
+     vacuum-stats module may pack
+     <literal>(reloid &lt;&lt; 2) | type_tag</literal> to track table
+     and index entries for the same OID separately.
+     <literal>dboid = InvalidOid (0)</literal> is the conventional
+     choice for cluster-wide entries that
+     <structfield>accessed_across_databases</structfield> exposes
+     everywhere.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>Drop semantics.</emphasis> The cumulative statistics
+     system does not know the lifecycle of objects identified by
+     <literal>objid</literal>; if entries should disappear when an
+     object is dropped, register an
+     <function>object_access_hook</function> with
+     <literal>OAT_DROP</literal> and call
+     <function>pgstat_reset_entry</function> from there.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>Memory accounting.</emphasis> Each entry consumes
+     <structfield>shared_size</structfield> bytes plus DSA hash
+     overhead. The module can expose
+     <function>pgstat_get_entry_count(kind) *
+     sizeof(<replaceable>shared_struct</replaceable>)</function> as a
+     SQL-callable estimate of its footprint; cluster operators use
+     this for capacity planning.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <emphasis>Forward compatibility.</emphasis> Modules that target
+     <productname>PostgreSQL</productname> 18+ as well should include
+     <filename>utils/pgstat_kind.h</filename> rather than reaching
+     into <filename>utils/pgstat_internal.h</filename> directly. The
+     compatibility shim re-exports the registration API, and the
+     <structfield>write_to_file</structfield> /
+     <structfield>track_entry_count</structfield> flags accept the
+     same values they take upstream.
+    </para>
+   </listitem>
+  </itemizedlist>
+ </sect1>
+
+ <sect1 id="custom-stats-reference">
+  <title>Function Reference</title>
+
+  <variablelist>
+   <varlistentry>
+    <term>
+     <function>void pgstat_register_kind(PgStat_Kind kind, const PgStat_KindInfo *kind_info)</function>
+    </term>
+    <listitem>
+     <para>
+      Register <parameter>kind_info</parameter> as the descriptor for
+      cumulative statistics kind <parameter>kind</parameter>. The
+      <parameter>kind</parameter> must be in the
+      <literal>PGSTAT_KIND_CUSTOM_MIN .. PGSTAT_KIND_CUSTOM_MAX</literal>
+      range and not already registered. The
+      <parameter>kind_info</parameter> pointer must remain valid for the
+      lifetime of the process. Must be called during
+      <symbol>process_shared_preload_libraries_in_progress</symbol>;
+      otherwise raises <literal>ERROR</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>int64 pgstat_get_entry_count(PgStat_Kind kind)</function>
+    </term>
+    <listitem>
+     <para>
+      Return the number of entries in shared memory whose key matches
+      <parameter>kind</parameter>. Walks the cumulative statistics
+      shared hash holding a shared exclusive lock; treat as O(N) over
+      total entries and avoid calling on hot paths.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+
+  <para>
+   The remaining primitives (<function>pgstat_get_entry_ref_locked</function>,
+   <function>pgstat_unlock_entry</function>,
+   <function>pgstat_fetch_entry</function>,
+   <function>pgstat_reset_entry</function>,
+   <function>pgstat_reset_of_kind</function>,
+   <function>pgstat_have_entry</function>) are unchanged from the
+   built-in cumulative statistics system; refer to their declarations
+   in <filename>utils/pgstat_internal.h</filename> and
+   <filename>pgstat.h</filename>.
+  </para>
+ </sect1>
+
+</chapter>

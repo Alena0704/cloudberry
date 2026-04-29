@@ -60,6 +60,24 @@ typedef enum PgStat_Kind
 #define PGSTAT_KIND_LAST PGSTAT_KIND_WAL
 #define PGSTAT_NUM_KINDS (PGSTAT_KIND_LAST + 1)
 
+/*
+ * Custom cumulative statistics kinds.
+ *
+ * Backported from PG18 (commit f98dbdeb51 — "Make stats reporting extensible").
+ * Custom kinds are registered at backend startup via pgstat_register_kind() —
+ * typically from a module's _PG_init() while loading from
+ * shared_preload_libraries.  IDs in [PGSTAT_KIND_CUSTOM_MIN ..
+ * PGSTAT_KIND_CUSTOM_MAX] are reserved for extensions and indexed into a
+ * separate per-process registration table; PGSTAT_NUM_KINDS still sizes the
+ * builtin fixed-size arrays only.
+ */
+#define PGSTAT_KIND_BUILTIN_MIN		PGSTAT_KIND_FIRST_VALID
+#define PGSTAT_KIND_BUILTIN_MAX		PGSTAT_KIND_LAST
+
+#define PGSTAT_KIND_CUSTOM_MIN		24
+#define PGSTAT_KIND_CUSTOM_MAX		31
+#define PGSTAT_KIND_CUSTOM_SIZE		(PGSTAT_KIND_CUSTOM_MAX - PGSTAT_KIND_CUSTOM_MIN + 1)
+
 /* Values for track_functions GUC variable --- order is significant! */
 typedef enum TrackFunctionsLevel
 {
@@ -548,6 +566,16 @@ extern TimestampTz pgstat_get_stat_snapshot_timestamp(bool *have_snapshot);
 /* helpers */
 extern PgStat_Kind pgstat_get_kind_from_str(char *kind_str);
 extern bool pgstat_have_entry(PgStat_Kind kind, Oid dboid, Oid objoid);
+
+/*
+ * Custom cumulative-stats-kind registration. See PG18's f98dbdeb51 for the
+ * design. The PgStat_KindInfo struct is defined in utils/pgstat_internal.h;
+ * extensions include that header to populate it.
+ */
+struct PgStat_KindInfo;
+extern void pgstat_register_kind(PgStat_Kind kind,
+								 const struct PgStat_KindInfo *kind_info);
+extern int64 pgstat_get_entry_count(PgStat_Kind kind);
 
 
 /*
