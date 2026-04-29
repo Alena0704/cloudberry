@@ -239,7 +239,7 @@ gp_aocsseg_history_wrapper(PG_FUNCTION_ARGS)
  *
  * CREATE FUNCTION gp_aoblkdir_wrapper(regclass) RETURNS TABLE
  * (segno integer, columngroup_no integer, first_row_no bigint, file_offset bigint, row_count bigint)
- * AS '$libdir/gp_ao_co_diagnostics.so', 'gp_aoblkdir_wrapper' LANGUAGE C STRICT;
+ * AS '$libdir/gp_ao_co_diagnostics', 'gp_aoblkdir_wrapper' LANGUAGE C STRICT;
  */
 Datum
 gp_aoblkdir_wrapper(PG_FUNCTION_ARGS)
@@ -254,7 +254,7 @@ gp_aoblkdir_wrapper(PG_FUNCTION_ARGS)
  *
  * CREATE FUNCTION gp_aovisimap(regclass) RETURNS TABLE 
  * (tid tid, segno integer, row_num bigint) 
- * AS '$libdir/gp_ao_co_diagnostics.so', 'gp_aovisimap_wrapper' LANGUAGE C STRICT;
+ * AS '$libdir/gp_ao_co_diagnostics', 'gp_aovisimap_wrapper' LANGUAGE C STRICT;
  */
 Datum
 gp_aovisimap_wrapper(PG_FUNCTION_ARGS)
@@ -269,7 +269,7 @@ gp_aovisimap_wrapper(PG_FUNCTION_ARGS)
  *
  * CREATE FUNCTION gp_aovisimap_hidden_info(regclass) RETURNS TABLE 
  * (segno integer, hidden_tupcount bigint, total_tupcount bigint) 
- * AS '$libdir/gp_ao_co_diagnostics.so', 'gp_aovisimap_hidden_info_wrapper' LANGUAGE C STRICT;
+ * AS '$libdir/gp_ao_co_diagnostics', 'gp_aovisimap_hidden_info_wrapper' LANGUAGE C STRICT;
  */
 Datum
 gp_aovisimap_hidden_info_wrapper(PG_FUNCTION_ARGS)
@@ -284,7 +284,7 @@ gp_aovisimap_hidden_info_wrapper(PG_FUNCTION_ARGS)
  *
  * CREATE FUNCTION gp_aovisimap_entry(regclass) RETURNS TABLE 
  * (segno integer, hidden_tupcount bigint, total_tupcount bigint) 
- * AS '$libdir/gp_ao_co_diagnostics.so', 'gp_aovisimap_entry_wrapper' LANGUAGE C STRICT;
+ * AS '$libdir/gp_ao_co_diagnostics', 'gp_aovisimap_entry_wrapper' LANGUAGE C STRICT;
  */
 Datum
 gp_aovisimap_entry_wrapper(PG_FUNCTION_ARGS)

@@ -14,7 +14,7 @@
  *
  * CREATE OR REPLACE FUNCTION gp_shared_cache_stats()
  *   RETURNS RECORD
- *   AS '$libdir/gp_shared_cache.so', 'gp_shared_cache_stats'
+ *   AS '$libdir/gp_shared_cache', 'gp_shared_cache_stats'
  *   LANGUAGE C;
  *
  */

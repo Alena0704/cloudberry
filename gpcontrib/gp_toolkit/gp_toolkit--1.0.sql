@@ -1962,7 +1962,7 @@ RETURNS TABLE (tupleid tid,
     first_row_no bigint,
     file_offset bigint,
     row_count bigint)
-AS '$libdir/gp_ao_co_diagnostics.so', 'gp_aoblkdir_wrapper' LANGUAGE C STRICT;
+AS '$libdir/gp_ao_co_diagnostics', 'gp_aoblkdir_wrapper' LANGUAGE C STRICT;
 
 CREATE FUNCTION gp_toolkit.__gp_aovisimap(regclass)
 RETURNS TABLE (tid tid,

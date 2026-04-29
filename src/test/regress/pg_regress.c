@@ -1287,8 +1287,17 @@ initialize_environment(void)
 	setenv("PG_LIBDIR", dlpath, 1);
 	setenv("PG_DLSUFFIX", DLSUFFIX, 1);
 	setenv("PG_CURUSERNAME", get_user_name(&errstr), 1);
-	setenv("PG_BINDDIR", bindir, 1);
-	setenv("PG_HOSTNAME", get_host_name(is_singlenode_mode ? -1 : 0, 'p'), 1);
+	/* bindir is NULL when --bindir= was passed (use $PATH); setenv NULL crashes */
+	setenv("PG_BINDDIR", bindir ? bindir : "", 1);
+	/*
+	 * gp_segment_configuration only exists in a running MPP cluster; when we
+	 * are about to launch our own --temp-instance, fall back to a fixed
+	 * hostname so we don't try to query a not-yet-running coordinator.
+	 */
+	if (temp_instance)
+		setenv("PG_HOSTNAME", "localhost", 1);
+	else
+		setenv("PG_HOSTNAME", get_host_name(is_singlenode_mode ? -1 : 0, 'p'), 1);
 
 	if (nolocale)
 	{
@@ -3296,6 +3305,21 @@ regression_main(int argc, char *argv[],
 		if (!directory_exists(buf))
 			make_directory(buf);
 
+		/*
+		 * initdb spawns a `postgres --single` bootstrap which inherits
+		 * PGOPTIONS — including `-c gp_role=utility` set by isolation_main
+		 * before getopt parsing.  In single-user/bootstrap mode that combo
+		 * trips an assert (cloudberry's gp_role machinery is not designed
+		 * for the bootstrap context). Drop the env var temporarily so initdb
+		 * runs with vanilla settings; the temp postmaster spawned later sets
+		 * gp_role explicitly via its own -c args.
+		 */
+		{
+			char *saved_pgoptions = getenv("PGOPTIONS");
+			if (saved_pgoptions)
+				saved_pgoptions = pg_strdup(saved_pgoptions);
+			unsetenv("PGOPTIONS");
+
 		/* initdb */
 		snprintf(buf, sizeof(buf),
 				 "\"%s%sinitdb\" -D \"%s/data\" --no-clean --no-sync%s%s > \"%s/log/initdb.log\" 2>&1",
@@ -3312,6 +3336,13 @@ regression_main(int argc, char *argv[],
 				 "# Examine \"%s/log/initdb.log\" for the reason.\n"
 				 "# Command was: %s",
 				 outputdir, buf);
+		}
+
+			if (saved_pgoptions)
+			{
+				setenv("PGOPTIONS", saved_pgoptions, 1);
+				free(saved_pgoptions);
+			}
 		}
 
 		/*
@@ -3403,9 +3434,17 @@ regression_main(int argc, char *argv[],
 
 		/*
 		 * Start the temp postmaster
+		 *
+		 * Cloudberry's PostmasterMain() rejects startup unless
+		 * GpIdentity.dbid is set or we're in utility mode (see
+		 * postmaster.c). Pass `-b -1` (uninitialized dbid permitted in
+		 * utility mode) and `-c gp_role=utility` so isolation/regression
+		 * tests can spin up a stand-alone temp instance without faking an
+		 * MPP segment-config row.
 		 */
 		snprintf(buf, sizeof(buf),
 				 "\"%s%spostgres\" -D \"%s/data\" -F%s "
+				 "-c \"gp_role=utility\" -c \"gp_dbid=-1\" -c \"gp_contentid=-1\" "
 				 "-c \"listen_addresses=%s\" -k \"%s\" "
 				 "> \"%s/log/postmaster.log\" 2>&1",
 				 bindir ? bindir : "",
@@ -3515,27 +3554,45 @@ regression_main(int argc, char *argv[],
 			create_role(sl->str, dblist);
 	}
 
-	external_fts = check_external_fts();
-
 	/*
-	 * Find out if optimizer is on or off
+	 * The cluster-feature-detection probes (check_external_fts,
+	 * check_feature_status, convert_sourcefiles) all assume an MPP cluster is
+	 * already running and reachable on the default psql connection. With
+	 * --temp-instance the cluster is the one we're about to launch a few
+	 * lines below, so probing it here just hangs/fails. Substitute reasonable
+	 * stand-alone defaults in that mode.
 	 */
-	optimizer_enabled = check_feature_status("optimizer", "on",
-			"Optimizer enabled. Using optimizer answer files whenever possible",
-			"Optimizer disabled. Using planner answer files");
+	if (temp_instance)
+	{
+		external_fts = false;
+		optimizer_enabled = false;
+		resgroup_enabled = false;
+		is_singlenode_mode = true;
+		content_zero_hostname = pg_strdup("localhost");
+	}
+	else
+	{
+		external_fts = check_external_fts();
 
-	/*
-	 * Find out if gp_resource_manager is group or not
-	 */
-	resgroup_enabled = check_feature_status("gp_resource_manager", "group",
-			"Resource group enabled. Using resource group answer files whenever possible",
-			"Resource group disabled. Using default answer files");
+		/*
+		 * Find out if optimizer is on or off
+		 */
+		optimizer_enabled = check_feature_status("optimizer", "on",
+				"Optimizer enabled. Using optimizer answer files whenever possible",
+				"Optimizer disabled. Using planner answer files");
 
-//	force_parallel_enabled = check_feature_status("force_parallel_mode", "on",
-//			"Force parallel mode enabled. Result diffs will ignore plans.",
-//			"Force parallel mode disabled. Using default answer files");
+		/*
+		 * Find out if gp_resource_manager is group or not
+		 */
+		resgroup_enabled = check_feature_status("gp_resource_manager", "group",
+				"Resource group enabled. Using resource group answer files whenever possible",
+				"Resource group disabled. Using default answer files");
+		is_singlenode_mode = check_feature_status("gp_internal_is_singlenode", "on",
+				"Single node (no segments) mode enabled. Replace '@hostname@' by hostname of contentid = -1",
+				"Normal cluster detected. Replace '@hostname@' by hostname of contentid = 0");
 
-	convert_sourcefiles();
+		convert_sourcefiles();
+	}
 
 	/*
 	 * Ready to run the tests

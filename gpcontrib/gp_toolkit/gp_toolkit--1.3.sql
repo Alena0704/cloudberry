@@ -1930,7 +1930,7 @@ GRANT SELECT ON gp_toolkit.gp_resgroup_role TO public;
 -- Internal functions that will be used by gp_toolkit.gp_resgroup_iostats_per_host
 CREATE TYPE gp_toolkit.__iostats AS (segindex int4, rsgname text, groupid oid, tablespace text, "rbps" int8, "wbps" int8, "riops" int8, "wiops" int8);
 
-CREATE FUNCTION gp_toolkit.__gp_resgroup_iostats() RETURNS SETOF gp_toolkit.__iostats AS 'gp_toolkit.so','pg_resgroup_get_iostats' LANGUAGE C STRICT;
+CREATE FUNCTION gp_toolkit.__gp_resgroup_iostats() RETURNS SETOF gp_toolkit.__iostats AS '$libdir/gp_toolkit','pg_resgroup_get_iostats' LANGUAGE C STRICT;
 
 GRANT EXECUTE ON FUNCTION gp_toolkit.__gp_resgroup_iostats TO public;
 
@@ -2017,7 +2017,7 @@ RETURNS TABLE (tupleid tid,
     first_row_no bigint,
     file_offset bigint,
     row_count bigint)
-AS '$libdir/gp_ao_co_diagnostics.so', 'gp_aoblkdir_wrapper' LANGUAGE C STRICT;
+AS '$libdir/gp_ao_co_diagnostics', 'gp_aoblkdir_wrapper' LANGUAGE C STRICT;
 
 CREATE FUNCTION gp_toolkit.__gp_aovisimap(regclass)
 RETURNS TABLE (tid tid,

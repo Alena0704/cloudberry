@@ -940,8 +940,6 @@ durable_rename_excl(const char *oldfile, const char *newfile, int elevel)
 }
 
 /*
-=======
->>>>>>> REL_16_9
  * InitFileAccess --- initialize this module during backend startup
  *
  * This is called during either normal or standalone backend start.
