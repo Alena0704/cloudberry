@@ -28,6 +28,7 @@ SUBDIRS = \
 		dblink		\
 		dict_int	\
 		dict_xsyn	\
+		ext_vacuum_statistics	\
 		file_fdw	\
 		fuzzystrmatch	\
 		hstore		\
