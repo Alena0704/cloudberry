@@ -14,11 +14,24 @@
 #include "gpos/base.h"
 
 #include "gpopt/base/CCTEReq.h"
+#include "gpopt/base/CDistributionSpec.h"
 
 using namespace gpopt;
 
 FORCE_GENERATE_DBGSTR(CCTEMap);
 FORCE_GENERATE_DBGSTR(CCTEMap::CCTEMapEntry);
+
+// True if the distribution kind is replicated-like (the Producer's data
+// is logically present on every segment). Universal counts as well: it
+// behaves the same way from the Consumer's point of view.
+static BOOL
+FReplicatedLikeEdt(CDistributionSpec::EDistributionType edt)
+{
+	return (CDistributionSpec::EdtStrictReplicated == edt ||
+			CDistributionSpec::EdtTaintedReplicated == edt ||
+			CDistributionSpec::EdtReplicated == edt ||
+			CDistributionSpec::EdtUniversal == edt);
+}
 
 //---------------------------------------------------------------------------
 //	@function:
@@ -316,10 +329,42 @@ CCTEMap::FSatisfies(const CCTEReq *pcter) const
 	{
 		const CCTEMapEntry *pcme = hmcmi.Value();
 		ECteType ect = pcme->Ect();
+		ULONG id = pcme->Id();
+
 		if (CCTEMap::EctConsumer == ect &&
-			!pcter->FContainsRequirement(pcme->Id(), ect))
+			!pcter->FContainsRequirement(id, ect))
 		{
 			return false;
+		}
+
+		// Prune alternatives where a Producer was expected to be
+		// replicated-like (per the sibling-side requirement carried in
+		// PdpplanProducer) but the derived Producer plan delivers a
+		// non-replicated distribution -- this is a clear mismatch we
+		// can catch during search.
+		//
+		// Scope: at this point we only have CDistributionSpec, which
+		// encodes the distribution kind but not slice ids. Cross-slice
+		// configurations where both ends are formally replicated but
+		// end up in different physical slices (e.g. via a Broadcast
+		// Motion) are not captured here -- slice assignment happens
+		// later, during Motion enforcement. Those residual cases are
+		// caught downstream by the pre-DXL walker in
+		// CUtils::FHasCrossSliceReplicatedCTEConsumer.
+		if (CCTEMap::EctProducer == ect && nullptr != pcme->Pdpplan())
+		{
+			CDrvdPropPlan *pdpplanExpected = pcter->Pdpplan(id);
+			if (nullptr != pdpplanExpected)
+			{
+				CDistributionSpec *pdsDerived = pcme->Pdpplan()->Pds();
+				CDistributionSpec *pdsExpected = pdpplanExpected->Pds();
+				if (nullptr != pdsDerived && nullptr != pdsExpected &&
+					FReplicatedLikeEdt(pdsExpected->Edt()) &&
+					!FReplicatedLikeEdt(pdsDerived->Edt()))
+				{
+					return false;
+				}
+			}
 		}
 	}
 
