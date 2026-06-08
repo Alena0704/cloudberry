@@ -353,6 +353,12 @@ explain (costs off)
   select v.c, (select count(*) from gstest2 group by () having v.c)
     from (values (false),(true)) v(c) order by v.c;
 
+-- HAVING with constant-false predicate on an empty grouping set must emit
+-- zero rows, not the default scalar-aggregate row.
+select count(*) from gstest2 group by grouping sets (()) having false;
+explain (costs off)
+  select count(*) from gstest2 group by grouping sets (()) having false;
+
 -- HAVING with GROUPING queries
 select ten, grouping(ten) from onek
 group by grouping sets(ten) having grouping(ten) >= 0
@@ -546,6 +552,7 @@ select array(select row(v.a,s1.*) from (select two,four, count(*) from onek grou
 
 set hash_mem_multiplier = 1;
 set enable_indexscan = false;
+set hash_mem_multiplier = 1.0;
 set work_mem = '64kB';
 explain (costs off)
   select unique1,
@@ -654,6 +661,7 @@ set jit_above_cost to default;
 
 set enable_sort = true;
 set work_mem to default;
+set hash_mem_multiplier to default;
 
 -- Compare results of ORCA plan that relies on "IS NOT DISTINCT FROM" HASH Join
 
