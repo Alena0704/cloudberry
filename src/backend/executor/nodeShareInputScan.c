@@ -296,6 +296,14 @@ init_tuplestore_state(ShareInputScanState *node)
 
 			if (sisc->cross_slice)
 			{
+#ifdef FAULT_INJECTOR
+				/*
+				 * Let tests delay the producer right before it publishes the
+				 * tuplestore, to catch consumers that don't wait for it
+				 * (e.g. because they were not marked as cross-slice).
+				 */
+				SIMPLE_FAULT_INJECTOR("shareinput_writer_pre_freeze");
+#endif
 				tuplestore_freeze(ts);
 				shareinput_writer_notifyready(node->ref);
 			}
