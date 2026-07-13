@@ -148,3 +148,84 @@ WITH
   LIMIT 1;
 RESET statement_timeout;
 DROP TABLE ss_t1, ss_t2;
+
+-- Test cross-slice interaction detection for Shared Scans referenced from
+-- within SubPlans (ported from Greengage PR #342 / open-gpdb PR #396).
+--
+-- A Shared Scan consumer can end up inside a SubPlan whose slice differs
+-- from the producer's slice. Cross-slice interaction detection must take
+-- the slice of the SubPlan's reference point into account (in Cloudberry
+-- it is tracked via glob->subplan_sliceIds), otherwise the consumer is not
+-- marked as cross-slice and either fails or silently returns wrong results.
+-- No error like "ERROR:  cannot execute inactive Motion" should be shown.
+-- start_ignore
+create extension if not exists gp_inject_fault with schema public;
+-- end_ignore
+set search_path = shared_scan, public;
+create table xslice_t1 (a int, b int, c int) distributed by (a);
+explain (costs off)
+with cte1 as (
+  select max(c) as c from xslice_t1
+),
+cte2 as (
+  select d as c
+  from generate_series(
+    (select c from cte1) - 4,
+    (select c from cte1), 1) d
+)
+select l.c from cte2 l
+left join xslice_t1 u on l.c = u.c;
+
+with cte1 as (
+  select max(c) as c from xslice_t1
+),
+cte2 as (
+  select d as c
+  from generate_series(
+    (select c from cte1) - 4,
+    (select c from cte1), 1) d
+)
+select l.c from cte2 l
+left join xslice_t1 u on l.c = u.c;
+
+-- On a version with broken cross-slice detection this case gave a flaky
+-- count(*) result: the Shared Scan consumer in the subplan's slice did not
+-- wait for the producer. The fault point delays the producer right before
+-- it publishes the tuplestore, turning a flaky wrong result into a stable
+-- one. With correct cross-slice detection the result is a stable '100'.
+create table xslice_t2(i int, j int) distributed by (i);
+insert into xslice_t2 select i, i * 10 from generate_series(1, 10) i;
+
+select gp_inject_fault('shareinput_writer_pre_freeze', 'reset', dbid)
+from gp_segment_configuration where role = 'p' and content = -1;
+select gp_inject_fault('shareinput_writer_pre_freeze',
+       'sleep', '', '', '', 1, 1, 5, dbid)
+from gp_segment_configuration where role = 'p' and content = -1;
+set optimizer_parallel_union = on;
+
+explain (costs off)
+with cte1 as (
+  select max(j) as max_j from xslice_t2
+)
+select count(*) c
+from (
+  select s * 10 s
+  from generate_series(1, (select max_j from cte1)) s
+  union
+  select max_j from cte1
+) t;
+
+with cte1 as (
+  select max(j) as max_j from xslice_t2
+)
+select count(*) c
+from (
+  select s * 10 s
+  from generate_series(1, (select max_j from cte1)) s
+  union
+  select max_j from cte1
+) t;
+
+reset optimizer_parallel_union;
+select gp_inject_fault_infinite('shareinput_writer_pre_freeze', 'reset', dbid)
+from gp_segment_configuration where role = 'p' and content = -1;
