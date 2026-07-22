@@ -288,6 +288,9 @@ static Path *create_scatter_path(PlannerInfo *root, List *scatterClause, Path *p
 
 static Oid getSimplyUpdatableRel(Query *query);
 
+static bool isQueryForOrca(Query *parse);
+static bool query_has_params(Query *parse);
+
 static split_rollup_data *make_new_rollups_for_hash_grouping_set(PlannerInfo *root,
 																 Path *path,
 																 grouping_sets_data *gd);
@@ -395,12 +398,16 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	 * For these reasons, restrict to using ORCA on the master QD processes only.
 	 *
 	 * PARALLEL RETRIEVE CURSOR is not supported by ORCA yet.
+	 *
+	 * isQueryForOrca() additionally lets us bypass ORCA for queries that it
+	 * cannot usefully optimize, such as trivial constant queries.
 	 */
 	if (optimizer &&
 		GP_ROLE_DISPATCH == Gp_role &&
 		IS_QUERY_DISPATCHER() &&
 		(cursorOptions & CURSOR_OPT_SKIP_FOREIGN_PARTITIONS) == 0 &&
-		(cursorOptions & CURSOR_OPT_PARALLEL_RETRIEVE) == 0)
+		(cursorOptions & CURSOR_OPT_PARALLEL_RETRIEVE) == 0 &&
+		isQueryForOrca(parse))
 	{
 
 #ifdef USE_ORCA
@@ -7958,6 +7965,56 @@ getSimplyUpdatableRel(Query *query)
 			return rte->relid;
 	}
 	return InvalidOid;
+}
+
+/*
+ * query_has_params
+ *		Does the query tree reference any parameters?
+ */
+static bool
+query_has_params_walker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Param))
+		return true;
+	if (IsA(node, Query))
+		return query_tree_walker((Query *) node, query_has_params_walker,
+								 context, 0);
+	return expression_tree_walker(node, query_has_params_walker, context);
+}
+
+static bool
+query_has_params(Query *parse)
+{
+	return query_tree_walker(parse, query_has_params_walker, NULL, 0);
+}
+
+/*
+ * isQueryForOrca
+ *		Should this query be handed to the ORCA optimizer at all?
+ *
+ * ORCA brings no benefit for trivial constant queries such as "SELECT 42":
+ * they have no range table to distribute across segments, so the Postgres
+ * planner handles them directly, without the overhead of an ORCA attempt that
+ * would only fall back to the Postgres planner anyway.
+ *
+ * Queries carrying parameters (for example the bodies of SQL/PL functions) are
+ * still handed to ORCA, preserving its existing handling of them.
+ *
+ * Additional rules for bypassing ORCA can be added here.
+ */
+static bool
+isQueryForOrca(Query *parse)
+{
+	if (parse->commandType == CMD_SELECT &&
+		parse->rtable == NIL &&
+		!parse->hasSubLinks &&
+		parse->parentStmtType == PARENTSTMTTYPE_NONE &&
+		!query_has_params(parse))
+		return false;
+
+	return true;
 }
 
 /*
