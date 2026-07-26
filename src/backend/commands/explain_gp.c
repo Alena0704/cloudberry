@@ -64,6 +64,8 @@ typedef struct CdbExplain_StatInst
 	bool		workfileCreated;	/* workfile created in this node */
 	instr_time	firststart;		/* Start time of first iteration of node */
 	int			numPartScanned; /* Number of part tables scanned */
+	double		shareinputwait; /* ShareInputScan: seconds blocked on another
+								 * slice */
 
 	TuplesortInstrumentation sortstats; /* Sort stats, if this is a Sort node */
 	HashInstrumentation hashstats; /* Hash stats, if this is a Hash node */
@@ -135,6 +137,14 @@ typedef struct CdbExplain_NodeSummary
 	CdbExplain_Agg totalPartTableScanned;
 	/* Summary of space used by sort */
 	CdbExplain_Agg sortSpaceUsed[NUM_SORT_SPACE_TYPE][NUM_SORT_METHOD];
+
+	/*
+	 * Time a cross-slice ShareInputScan spent blocked on another slice.
+	 * Aggregated across workers, because the per-worker extra message text is
+	 * selected by memory/row-count criteria and would otherwise report an
+	 * arbitrary worker's wait rather than the worst one.
+	 */
+	CdbExplain_Agg shareinputwait;
 
 	/* insts array info */
 	int			segindex0;		/* segment id of insts[0] */
@@ -909,6 +919,13 @@ cdbexplain_collectStatsFromNode(PlanState *planstate, CdbExplain_SendStatCtx *ct
 		if (hashstate->hashtable)
 			ExecHashAccumInstrumentation(&si->hashstats, hashstate->hashtable);
 	}
+	if (IsA(planstate, ShareInputScanState))
+	{
+		ShareInputScanState *sisstate = (ShareInputScanState *) planstate;
+
+		si->shareinputwait =
+			INSTR_TIME_GET_DOUBLE(sisstate->waitready_time);
+	}
 	if (IsA(planstate, IncrementalSortState))
 	{
 		IncrementalSortState *incrementalstate = (IncrementalSortState*) planstate;
@@ -1061,6 +1078,7 @@ cdbexplain_depositStatsToNode(PlanState *planstate, CdbExplain_RecvStatCtx *ctx)
 	CdbExplain_DepStatAcc vmem_reserved;
 	CdbExplain_DepStatAcc totalPartTableScanned;
 	CdbExplain_DepStatAcc sortSpaceUsed[NUM_SORT_SPACE_TYPE][NUM_SORT_METHOD];
+	CdbExplain_DepStatAcc shareinputwait;
 	int			imsgptr;
 	int			nInst;
 
@@ -1085,6 +1103,7 @@ cdbexplain_depositStatsToNode(PlanState *planstate, CdbExplain_RecvStatCtx *ctx)
 	cdbexplain_depStatAcc_init0(&workmemwanted);
 	cdbexplain_depStatAcc_init0(&totalWorkfileCreated);
 	cdbexplain_depStatAcc_init0(&totalPartTableScanned);
+	cdbexplain_depStatAcc_init0(&shareinputwait);
 	for (int i = 0; i < NUM_SORT_METHOD; i++)
 	{
 		for (int j = 0; j < NUM_SORT_SPACE_TYPE; j++)
@@ -1130,6 +1149,7 @@ cdbexplain_depositStatsToNode(PlanState *planstate, CdbExplain_RecvStatCtx *ctx)
 		cdbexplain_depStatAcc_upd(&workmemwanted, rsi->workmemwanted, rsh, rsi, nsi);
 		cdbexplain_depStatAcc_upd(&totalWorkfileCreated, (rsi->workfileCreated ? 1 : 0), rsh, rsi, nsi);
 		cdbexplain_depStatAcc_upd(&totalPartTableScanned, rsi->numPartScanned, rsh, rsi, nsi);
+		cdbexplain_depStatAcc_upd(&shareinputwait, rsi->shareinputwait, rsh, rsi, nsi);
 		Assert(rsi->sortstats.sortMethod < NUM_SORT_METHOD);
 		Assert(rsi->sortstats.spaceType < NUM_SORT_SPACE_TYPE);
 		if (rsi->sortstats.sortMethod != SORT_TYPE_STILL_IN_PROGRESS)
@@ -1157,6 +1177,7 @@ cdbexplain_depositStatsToNode(PlanState *planstate, CdbExplain_RecvStatCtx *ctx)
 	ns->workmemwanted = workmemwanted.agg;
 	ns->totalWorkfileCreated = totalWorkfileCreated.agg;
 	ns->totalPartTableScanned = totalPartTableScanned.agg;
+	ns->shareinputwait = shareinputwait.agg;
 	for (int i = 0; i < NUM_SORT_METHOD; i++)
 	{
 		for (int j = 0; j < NUM_SORT_SPACE_TYPE; j++)
@@ -1675,6 +1696,53 @@ cdbexplain_showExecStats(struct PlanState *planstate, ExplainState *es)
 			}
 
 			ExplainCloseGroup("work_mem", "work_mem", true, es);
+		}
+	}
+
+	/*
+	 * Print how long a cross-slice ShareInputScan blocked waiting for another
+	 * slice.
+	 *
+	 * This is aggregated rather than left to the per-worker extra message
+	 * text, because that text is selected by memory and row-count criteria
+	 * (see cdbexplain_depositStatsToNode): with a skewed wait it would report
+	 * an arbitrary worker rather than the one that actually blocked. Showing
+	 * the max, its segment, and the average makes the skew itself visible.
+	 */
+	/*
+	 * Every cross-slice consumer pays some handshake cost, so only report a
+	 * wait that is material -- otherwise each such node would carry a
+	 * "0.000 ms" line of pure noise.
+	 */
+#define SHAREINPUT_WAIT_REPORT_THRESHOLD_SEC 0.001
+
+	if (T_ShareInputScanState == planstate->type &&
+		ns->shareinputwait.vmax >= SHAREINPUT_WAIT_REPORT_THRESHOLD_SEC)
+	{
+		double		wait_avg = cdbexplain_agg_avg(&ns->shareinputwait);
+
+		cdbexplain_formatSeg(segbuf, sizeof(segbuf), ns->shareinputwait.imax,
+							 ns->ninst);
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfo(es->str,
+							 "Cross-slice wait: %.3f ms max%s, %.3f ms avg x %d workers.\n",
+							 ns->shareinputwait.vmax * 1000.0, segbuf,
+							 wait_avg * 1000.0, ns->shareinputwait.vcnt);
+		}
+		else
+		{
+			ExplainOpenGroup("cross-slice-wait", "cross-slice-wait", true, es);
+			ExplainPropertyFloat("Max Wait", "ms",
+								 ns->shareinputwait.vmax * 1000.0, 3, es);
+			ExplainPropertyInteger("Max Wait Segment", NULL,
+								   ns->shareinputwait.imax, es);
+			ExplainPropertyFloat("Avg Wait", "ms", wait_avg * 1000.0, 3, es);
+			ExplainPropertyInteger("Workers", NULL,
+								   ns->shareinputwait.vcnt, es);
+			ExplainCloseGroup("cross-slice-wait", "cross-slice-wait", true, es);
 		}
 	}
 

@@ -63,6 +63,7 @@
 #include "executor/nodeShareInputScan.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "portability/instr_time.h"
 #include "storage/condition_variable.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
@@ -189,10 +190,28 @@ static void shareinput_release_callback(ResourceReleasePhase phase,
 										bool isTopLevel,
 										void *arg);
 
+/*
+ * Context for the errcontext callback installed while blocked on a
+ * cross-slice handshake. A query that never gets its handshake is killed by
+ * statement_timeout, so it produces no EXPLAIN ANALYZE output, no
+ * pg_stat_statements entry and no completion log line -- the elapsed wait
+ * would be lost entirely. Reporting it through errcontext puts it into the
+ * cancellation message itself, which is the only channel that survives.
+ */
+typedef struct shareinput_wait_errctx
+{
+	int			share_id;
+	int			slice_id;
+	bool		is_reader;
+	instr_time	starttime;
+} shareinput_wait_errctx;
+
+static void shareinput_wait_errcontext_callback(void *arg);
+
 static void shareinput_writer_notifyready(shareinput_Xslice_reference *ref);
-static void shareinput_reader_waitready(shareinput_Xslice_reference *ref);
+static void shareinput_reader_waitready(shareinput_Xslice_reference *ref, instr_time *waited);
 static void shareinput_reader_notifydone(shareinput_Xslice_reference *ref, int nconsumers);
-static void shareinput_writer_waitdone(shareinput_Xslice_reference *ref, int nconsumers);
+static void shareinput_writer_waitdone(shareinput_Xslice_reference *ref, int nconsumers, instr_time *waited);
 
 static void ExecShareInputScanExplainEnd(PlanState *planstate, struct StringInfoData *buf);
 
@@ -296,6 +315,14 @@ init_tuplestore_state(ShareInputScanState *node)
 
 			if (sisc->cross_slice)
 			{
+#ifdef FAULT_INJECTOR
+				/*
+				 * Let tests delay the producer right before it publishes the
+				 * tuplestore, to catch consumers that don't wait for it
+				 * (e.g. because they were not marked as cross-slice).
+				 */
+				SIMPLE_FAULT_INJECTOR("shareinput_writer_pre_freeze");
+#endif
 				tuplestore_freeze(ts);
 				shareinput_writer_notifyready(node->ref);
 			}
@@ -312,7 +339,13 @@ init_tuplestore_state(ShareInputScanState *node)
 
 			Assert(sisc->cross_slice);
 
-			shareinput_reader_waitready(node->ref);
+			/*
+			 * This is where a consumer blocks if the producer is slow to
+			 * publish -- or never publishes, which is how a mis-wired
+			 * cross-slice share manifests. Accumulate the wait so
+			 * ExecShareInputScanExplainEnd() can report it.
+			 */
+			shareinput_reader_waitready(node->ref, &node->waitready_time);
 
 			shareinput_create_bufname_prefix(rwfile_prefix, sizeof(rwfile_prefix), sisc->share_id);
 			ts = tuplestore_open_shared(get_shareinput_fileset(), rwfile_prefix);
@@ -526,8 +559,17 @@ ExecInitShareInputScan(ShareInputScan *node, EState *estate, int eflags)
 static void
 ExecShareInputScanExplainEnd(PlanState *planstate, struct StringInfoData *buf)
 {
+	ShareInputScanState *node = (ShareInputScanState *) planstate;
 	ShareInputScan *sisc = (ShareInputScan *) planstate->plan;
-	shareinput_local_state *local_state = ((ShareInputScanState *) planstate)->local_state;
+	shareinput_local_state *local_state = node->local_state;
+
+	/*
+	 * The cross-slice wait is not reported here: extra message text is shown
+	 * for a single worker chosen by memory and row-count criteria (see
+	 * cdbexplain_depositStatsToNode), which for a skewed wait would report an
+	 * arbitrary worker instead of the one that actually blocked. It is
+	 * collected from waitready_time and aggregated across workers instead.
+	 */
 
 	/*
 	 * Release tuplestore resources
@@ -566,7 +608,20 @@ ExecEndShareInputScan(ShareInputScanState *node)
 			{
 				if (!local_state->ready)
 					init_tuplestore_state(node);
-				shareinput_writer_waitdone(node->ref, sisc->nconsumers);
+
+				/*
+				 * The producer blocks here until every consumer slice reports
+				 * done, so a consumer that never arrives shows up as a long
+				 * wait on this side.
+				 *
+				 * This cannot be surfaced in EXPLAIN ANALYZE: we are inside
+				 * ExecEndPlan(), and cdbexplain_sendExecStats() has already
+				 * shipped this node's stats to the QD. The wait is logged
+				 * instead (see shareinput_writer_waitdone), which is also the
+				 * only form that survives a query killed by statement_timeout.
+				 */
+				shareinput_writer_waitdone(node->ref, sisc->nconsumers,
+										   &node->waitdone_time);
 			}
 			else
 			{
@@ -930,6 +985,35 @@ shareinput_release_callback(ResourceReleasePhase phase,
 }
 
 /*
+ * shareinput_wait_errcontext_callback
+ *
+ *  Adds the elapsed cross-slice wait to any error raised while we are blocked
+ *  on the handshake -- most importantly the statement_timeout cancellation,
+ *  which is how a mis-wired cross-slice share ends. Without this the wait is
+ *  unobservable after the fact: the query produces no EXPLAIN ANALYZE output
+ *  and no pg_stat_statements row, because it never reaches the end of
+ *  execution.
+ */
+static void
+shareinput_wait_errcontext_callback(void *arg)
+{
+	shareinput_wait_errctx *ctx = (shareinput_wait_errctx *) arg;
+	instr_time	now;
+
+	INSTR_TIME_SET_CURRENT(now);
+	INSTR_TIME_SUBTRACT(now, ctx->starttime);
+
+	if (ctx->is_reader)
+		errcontext("ShareInputScan consumer (share_id=%d) in slice %d blocked %.3f ms waiting for the producer slice to publish",
+				   ctx->share_id, ctx->slice_id,
+				   INSTR_TIME_GET_MILLISEC(now));
+	else
+		errcontext("ShareInputScan producer (share_id=%d) in slice %d blocked %.3f ms waiting for consumer slices to finish reading",
+				   ctx->share_id, ctx->slice_id,
+				   INSTR_TIME_GET_MILLISEC(now));
+}
+
+/*
  * shareinput_reader_waitready
  *
  *  Called by the reader (consumer) to wait for the writer (producer) to produce
@@ -938,12 +1022,27 @@ shareinput_release_callback(ResourceReleasePhase phase,
  *  This is a blocking operation.
  */
 static void
-shareinput_reader_waitready(shareinput_Xslice_reference *ref)
+shareinput_reader_waitready(shareinput_Xslice_reference *ref, instr_time *waited)
 {
 	shareinput_Xslice_state *state = ref->xslice_state;
+	instr_time	starttime;
+	instr_time	endtime;
+	shareinput_wait_errctx waitctx;
+	ErrorContextCallback errcallback;
 
 	elog((Debug_shareinput_xslice ? LOG : DEBUG1), "SISC READER (shareid=%d, slice=%d): Waiting for producer",
 		 ref->share_id, currentSliceId);
+
+	INSTR_TIME_SET_CURRENT(starttime);
+
+	waitctx.share_id = ref->share_id;
+	waitctx.slice_id = currentSliceId;
+	waitctx.is_reader = true;
+	waitctx.starttime = starttime;
+	errcallback.callback = shareinput_wait_errcontext_callback;
+	errcallback.arg = (void *) &waitctx;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
 
 	/*
 	 * Wait until the the producer sets 'ready' to true. The producer will
@@ -963,9 +1062,15 @@ shareinput_reader_waitready(shareinput_Xslice_reference *ref)
 	}
 	ConditionVariableCancelSleep();
 
+	error_context_stack = errcallback.previous;
+
+	INSTR_TIME_SET_CURRENT(endtime);
+	INSTR_TIME_ACCUM_DIFF(*waited, endtime, starttime);
+
 	/* it's ready now */
-	elog((Debug_shareinput_xslice ? LOG : DEBUG1), "SISC READER (shareid=%d, slice=%d): Wait ready got writer's handshake",
-		 ref->share_id, currentSliceId);
+	elog((Debug_shareinput_xslice ? LOG : DEBUG1), "SISC READER (shareid=%d, slice=%d): Wait ready got writer's handshake after %.3f ms",
+		 ref->share_id, currentSliceId,
+		 INSTR_TIME_GET_MILLISEC(*waited));
 }
 
 /*
@@ -1025,13 +1130,29 @@ shareinput_reader_notifydone(shareinput_Xslice_reference *ref, int nconsumers)
  *  This is a blocking operation.
  */
 static void
-shareinput_writer_waitdone(shareinput_Xslice_reference *ref, int nconsumers)
+shareinput_writer_waitdone(shareinput_Xslice_reference *ref, int nconsumers,
+						   instr_time *waited)
 {
 	shareinput_Xslice_state *state = ref->xslice_state;
+	instr_time	starttime;
+	instr_time	endtime;
+	shareinput_wait_errctx waitctx;
+	ErrorContextCallback errcallback;
 
 	int ready = pg_atomic_read_u32(&state->ready);
 	if (!ready)
 		elog(ERROR, "shareinput_writer_waitdone() called without creating the tuplestore");
+
+	INSTR_TIME_SET_CURRENT(starttime);
+
+	waitctx.share_id = ref->share_id;
+	waitctx.slice_id = currentSliceId;
+	waitctx.is_reader = false;
+	waitctx.starttime = starttime;
+	errcallback.callback = shareinput_wait_errcontext_callback;
+	errcallback.arg = (void *) &waitctx;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
 
 	ConditionVariablePrepareToSleep(&state->ready_done_cv);
 	for (;;)
@@ -1057,8 +1178,14 @@ shareinput_writer_waitdone(shareinput_Xslice_reference *ref, int nconsumers)
 		break;
 	}
 
-	elog((Debug_shareinput_xslice ? LOG : DEBUG1), "SISC WRITER (shareid=%d, slice=%d): got DONE message from %d readers",
-		 ref->share_id, currentSliceId, nconsumers);
+	error_context_stack = errcallback.previous;
+
+	INSTR_TIME_SET_CURRENT(endtime);
+	INSTR_TIME_ACCUM_DIFF(*waited, endtime, starttime);
+
+	elog((Debug_shareinput_xslice ? LOG : DEBUG1), "SISC WRITER (shareid=%d, slice=%d): got DONE message from %d readers after %.3f ms",
+		 ref->share_id, currentSliceId, nconsumers,
+		 INSTR_TIME_GET_MILLISEC(*waited));
 
 	/* it's all done now */
 }

@@ -2708,6 +2708,20 @@ typedef struct ShareInputScanState
 	struct shareinput_Xslice_reference *ref;
 
 	bool		isready;
+
+	/*
+	 * Cross-slice wait accounting.  A consumer blocks until the producer
+	 * publishes its tuplestore; the producer blocks until every consumer
+	 * reports that it is done reading.  Both waits are invisible in the plan
+	 * otherwise, which makes a mis-wired cross-slice share look like a slow
+	 * node rather than a node blocked on another slice.
+	 *
+	 * waitready_time is reported by EXPLAIN ANALYZE.  waitdone_time only
+	 * reaches the log: the producer performs that wait in ExecEndPlan(), by
+	 * which point this node's stats have already been sent to the QD.
+	 */
+	instr_time	waitready_time; /* consumer waited for producer's tuplestore */
+	instr_time	waitdone_time;	/* producer waited for consumers to finish */
 } ShareInputScanState;
 
 /* XXX Should move into buf file */

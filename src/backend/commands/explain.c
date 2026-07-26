@@ -2249,6 +2249,42 @@ ExplainNode(PlanState *planstate, List *ancestors,
 					ExplainPropertyInteger("Share ID", NULL, sisc->share_id, es);
 					ExplainPropertyInteger("Slice ID", NULL, slice_id, es);
 				}
+
+				/*
+				 * The line above prints only the consumer's own slice and the
+				 * share id, so the cross-slice marking itself stays invisible:
+				 * whether this node reads the producer's tuplestore through the
+				 * cross-slice protocol, which slice is expected to write it, and
+				 * how many consumers the producer waits for. When that marking is
+				 * wrong the query returns wrong results or hangs in
+				 * shareinput_reader_waitready(), while the plan looks innocent.
+				 * Surface it under VERBOSE, so plain plan output is unchanged.
+				 *
+				 * this_slice_id is the slice the node itself was assigned to; it
+				 * should agree with the slice EXPLAIN is walking, and a mismatch
+				 * is itself a symptom. In a single-slice plan the executor
+				 * ignores these, and the planner may leave them at -1.
+				 */
+				if (es->verbose)
+				{
+					if (es->format == EXPLAIN_FORMAT_TEXT)
+						appendStringInfo(es->str,
+										 " [%s, producer slice: %d, node slice: %d, consumers: %d]",
+										 sisc->cross_slice ? "cross-slice" : "local",
+										 sisc->producer_slice_id,
+										 sisc->this_slice_id,
+										 sisc->nconsumers);
+					else
+					{
+						ExplainPropertyBool("Cross Slice", sisc->cross_slice, es);
+						ExplainPropertyInteger("Producer Slice ID", NULL,
+											   sisc->producer_slice_id, es);
+						ExplainPropertyInteger("Node Slice ID", NULL,
+											   sisc->this_slice_id, es);
+						ExplainPropertyInteger("Consumer Slices", NULL,
+											   sisc->nconsumers, es);
+					}
+				}
 			}
 			break;
 		case T_PartitionSelector:
