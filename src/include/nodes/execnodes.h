@@ -727,6 +727,20 @@ typedef struct EState
 	/* partition oid that is being scanned, used by DynamicBitmapHeapScan/IndexScan */
 	int			partitionOid;
 
+	/*
+	 * Longest time (in seconds) any cross-slice ShareInputScan consumer in
+	 * this query spent blocked waiting for its producer slice to publish.
+	 * Rolled up here per query so a stats collector can report it
+	 * query-level, for queries nobody is running EXPLAIN ANALYZE on: the wait
+	 * marks slice-to-slice skew and producer-side starvation, and it is the
+	 * only trace a query killed on statement_timeout while blocked here
+	 * leaves behind. The scope is this process, i.e. one slice: a segment
+	 * runs a QE per slice, each with its own EState, so a collector takes the
+	 * max across everything reported. Kept last in the struct to minimize ABI
+	 * churn.
+	 */
+	double		es_cross_slice_wait;
+
 } EState;
 
 struct PlanState;
@@ -2600,6 +2614,26 @@ typedef struct ShareInputScanState
 	struct shareinput_Xslice_reference *ref;
 
 	bool		isready;
+
+	/*
+	 * How long this consumer blocked waiting for the producer slice to
+	 * publish its tuplestore.  The wait is invisible in the plan otherwise,
+	 * which makes a node blocked on another slice look merely slow.  Reported
+	 * by EXPLAIN ANALYZE.
+	 *
+	 * A mis-wired cross-slice share is the extreme case, but the wait is
+	 * worth reading on healthy plans too: it is time this slice spent idle on
+	 * another one, so it separates a node that is slow from a node that is
+	 * waiting, it grows when the producer slice is starved of CPU or
+	 * interconnect, and its spread across segments (see the max, its segment,
+	 * and the average in EXPLAIN ANALYZE) measures how unevenly the producer
+	 * finished rather than anything about the consumer.
+	 *
+	 * The producer's own wait, for consumers to finish reading, is not
+	 * tracked here: it happens during node shutdown, after this node's stats
+	 * have been sent to the QD.  It is reported through errcontext only.
+	 */
+	instr_time	waitready_time;
 } ShareInputScanState;
 
 /* XXX Should move into buf file */
