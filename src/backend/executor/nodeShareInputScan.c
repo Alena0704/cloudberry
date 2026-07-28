@@ -196,6 +196,41 @@ static void shareinput_writer_waitdone(shareinput_Xslice_reference *ref, int nco
 
 static void ExecShareInputScanExplainEnd(PlanState *planstate, struct StringInfoData *buf);
 
+/*
+ * Context for the errcontext callback installed while blocked on a
+ * cross-slice handshake. A query that never gets its handshake is killed by
+ * statement_timeout, so it produces no EXPLAIN ANALYZE output and no
+ * completion log line -- the elapsed wait would be lost entirely. Reporting
+ * it through errcontext puts it into the cancellation message itself, which
+ * is the only channel that survives.
+ */
+typedef struct shareinput_wait_errctx
+{
+	int			share_id;
+	int			slice_id;
+	bool		is_reader;
+	instr_time	starttime;
+} shareinput_wait_errctx;
+
+static void
+shareinput_wait_errcontext_callback(void *arg)
+{
+	shareinput_wait_errctx *ctx = (shareinput_wait_errctx *) arg;
+	instr_time	elapsed;
+
+	INSTR_TIME_SET_CURRENT(elapsed);
+	INSTR_TIME_SUBTRACT(elapsed, ctx->starttime);
+
+	if (ctx->is_reader)
+		errcontext("ShareInputScan consumer (share_id=%d) in slice %d blocked %.3f ms waiting for the producer slice to publish",
+				   ctx->share_id, ctx->slice_id,
+				   INSTR_TIME_GET_MILLISEC(elapsed));
+	else
+		errcontext("ShareInputScan producer (share_id=%d) in slice %d blocked %.3f ms waiting for consumer slices to finish reading",
+				   ctx->share_id, ctx->slice_id,
+				   INSTR_TIME_GET_MILLISEC(elapsed));
+}
+
 
 /*
  * init_tuplestore_state
@@ -317,10 +352,46 @@ init_tuplestore_state(ShareInputScanState *node)
 			 * tuplestore.
 			 */
 			char		rwfile_prefix[100];
+			instr_time	starttime;
+			instr_time	endtime;
+			double		waited_sec;
+			ErrorContextCallback errcallback;
+			shareinput_wait_errctx waitctx;
 
 			Assert(sisc->cross_slice);
 
+			/*
+			 * Measure the wait, and attach the elapsed time to any error
+			 * raised while blocked -- most importantly the statement_timeout
+			 * cancellation, which is all that is left of a query that never
+			 * gets its handshake.
+			 */
+			INSTR_TIME_SET_CURRENT(starttime);
+
+			waitctx.share_id = sisc->share_id;
+			waitctx.slice_id = currentSliceId;
+			waitctx.is_reader = true;
+			waitctx.starttime = starttime;
+			errcallback.callback = shareinput_wait_errcontext_callback;
+			errcallback.arg = (void *) &waitctx;
+			errcallback.previous = error_context_stack;
+			error_context_stack = &errcallback;
+
 			shareinput_reader_waitready(node->ref);
+
+			error_context_stack = errcallback.previous;
+
+			INSTR_TIME_SET_CURRENT(endtime);
+			INSTR_TIME_ACCUM_DIFF(node->waitready_time, endtime, starttime);
+
+			/*
+			 * Roll the wait up to the query level so a stats collector can
+			 * report it (it only reads query-level, root-node
+			 * instrumentation). Keep the longest wait seen in this process.
+			 */
+			waited_sec = INSTR_TIME_GET_DOUBLE(node->waitready_time);
+			if (waited_sec > estate->es_cross_slice_wait)
+				estate->es_cross_slice_wait = waited_sec;
 
 			shareinput_create_bufname_prefix(rwfile_prefix, sizeof(rwfile_prefix), sisc->share_id);
 			ts = tuplestore_open_shared(get_shareinput_fileset(), rwfile_prefix);
@@ -572,9 +643,30 @@ ExecEndShareInputScan(ShareInputScanState *node)
 			 */
 			if (currentSliceId == sisc->producer_slice_id)
 			{
+				ErrorContextCallback errcallback;
+				shareinput_wait_errctx waitctx;
+
 				if (!local_state->ready)
 					init_tuplestore_state(node);
+
+				/*
+				 * The producer's wait is not reported by EXPLAIN ANALYZE: it
+				 * happens during node shutdown, after this node's statistics
+				 * have been sent to the QD. An error raised while blocked
+				 * here still carries the elapsed time.
+				 */
+				INSTR_TIME_SET_CURRENT(waitctx.starttime);
+				waitctx.share_id = sisc->share_id;
+				waitctx.slice_id = currentSliceId;
+				waitctx.is_reader = false;
+				errcallback.callback = shareinput_wait_errcontext_callback;
+				errcallback.arg = (void *) &waitctx;
+				errcallback.previous = error_context_stack;
+				error_context_stack = &errcallback;
+
 				shareinput_writer_waitdone(node->ref, sisc->nconsumers);
+
+				error_context_stack = errcallback.previous;
 			}
 			else
 			{

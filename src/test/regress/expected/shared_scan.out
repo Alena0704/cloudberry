@@ -409,3 +409,41 @@ from gp_segment_configuration where role = 'p' and content = -1;
  Success:
 (1 row)
 
+-- Cross-slice ShareInputScan wait accounting.
+--
+-- A consumer that blocks waiting for a slow producer slice reports the wait
+-- in EXPLAIN ANALYZE ("Cross-slice wait: N ms max ..."). Force a
+-- deterministic, above-threshold wait by making the producer sleep, and
+-- assert the line appears. The wrapper hides the non-deterministic timing
+-- value, returning only whether the line is present, so the test is stable.
+CREATE TABLE sisw_foo (a int, b int) DISTRIBUTED BY (a);
+CREATE TABLE sisw_bar (c int, d int) DISTRIBUTED BY (c);
+INSERT INTO sisw_foo VALUES (1, 2);
+INSERT INTO sisw_bar SELECT i, i FROM generate_series(1, 100) i;
+ANALYZE sisw_foo;
+ANALYZE sisw_bar;
+CREATE FUNCTION sisw_wait_reported(q text) RETURNS boolean AS $fn$
+DECLARE ln text;
+BEGIN
+  FOR ln IN EXECUTE 'explain (analyze, timing off, costs off) ' || q LOOP
+    IF strpos(ln, 'Cross-slice wait:') > 0 THEN RETURN true; END IF;
+  END LOOP;
+  RETURN false;
+END; $fn$ LANGUAGE plpgsql;
+SET optimizer = off;
+SET gp_cte_sharing = on;
+SELECT sisw_wait_reported($q$
+  WITH cte AS (SELECT a, b, pg_sleep(0.5)::text AS s FROM sisw_foo)
+  SELECT x.a FROM cte x
+  UNION ALL
+  SELECT y.a FROM cte y JOIN sisw_bar ON y.b = sisw_bar.c
+$q$);
+ sisw_wait_reported 
+--------------------
+ t
+(1 row)
+
+RESET gp_cte_sharing;
+RESET optimizer;
+DROP FUNCTION sisw_wait_reported(text);
+DROP TABLE sisw_foo, sisw_bar;
