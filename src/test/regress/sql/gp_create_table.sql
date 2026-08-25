@@ -32,6 +32,22 @@ create table distpol as select random(), 2 as foo distributed by (foo);
 select distkey, distclass from gp_distribution_policy where localoid = 'distpol'::regclass;
 drop table distpol;
 
+-- Make sure that we don't end up distributing by a resjunk column when no
+-- explicit distribution key is present. The ORDER BY key below is such a
+-- column: it is needed to run the query, but it is not part of the resulting
+-- relation, so the policy must not point at it. Only the Postgres planner
+-- deduces the policy this way, so pin the optimizer to keep the result the
+-- same however the suite is run.
+set optimizer=off;
+create table resjunk_test as
+    with cte as (select point(1, 2) as a, random() as b)
+    select a from cte order by b;
+select policytype, distkey, distclass from
+    gp_distribution_policy where localoid = 'resjunk_test'::regclass;
+select * from resjunk_test;
+drop table resjunk_test;
+reset optimizer;
+
 -- if the datatype of the index column is not hashable, can't update distribution
 -- key to it.
 create table distpol_ts (i int4, t tsvector) distributed by (i);

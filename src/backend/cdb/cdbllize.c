@@ -448,16 +448,29 @@ cdbllize_adjust_top_path(PlannerInfo *root, Path *best_path,
 			 */
 			if (!targetPolicy)
 			{
-				int			i;
 				List	   *policykeys = NIL;
 				List	   *policyopclasses = NIL;
 				ListCell   *lc;
 
-				i = 0;
-				foreach(lc, best_path->pathtarget->exprs)
+				/*
+				 * Walk the query's result tlist rather than the Path's
+				 * target list, because only the former tells which entries
+				 * are resjunk. The planner adds resjunk entries for columns
+				 * that are needed to execute the query, an ORDER BY key for
+				 * example, but that are not part of the resulting relation.
+				 * Distributing by one of those would leave the policy
+				 * pointing at an attribute the new table does not have.
+				 */
+				foreach(lc, root->processed_tlist)
 				{
-					Oid			typeOid = exprType((Node *) lfirst(lc));
+					TargetEntry *target = lfirst(lc);
+					Oid			typeOid;
 					Oid			opclass = InvalidOid;
+
+					if (target->resjunk)
+						continue;
+
+					typeOid = exprType((Node *) target->expr);
 
 					/*
 					 * Check for a legacy hash operator class if
@@ -474,11 +487,10 @@ cdbllize_adjust_top_path(PlannerInfo *root, Path *best_path,
 
 					if (OidIsValid(opclass))
 					{
-						policykeys = lappend_int(policykeys, i + 1);
+						policykeys = lappend_int(policykeys, target->resno);
 						policyopclasses = lappend_oid(policyopclasses, opclass);
 						break;
 					}
-					i++;
 				}
 				targetPolicy = createHashPartitionedPolicy(policykeys,
 														   policyopclasses,
