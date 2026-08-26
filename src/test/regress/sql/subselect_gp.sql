@@ -1526,4 +1526,11 @@ insert into t_in_csq_count values (0, 1);
 -- must be returned
 select * from t_in_csq_count x
 where x.a in (select count(*) from t_in_csq_count y where y.b = x.a);
+-- Shapes where coalesce(count, 0) is NOT the subquery's empty-input value
+-- must keep the semi-join: count()+1 is 1 over empty input, and a HAVING
+-- filter can make the subquery return no row at all. Neither may match a = 0.
+select * from t_in_csq_count x
+where x.a in (select count(*) + 1 from t_in_csq_count y where y.b = x.a);
+select * from t_in_csq_count x
+where x.a in (select count(*) from t_in_csq_count y where y.b = x.a having count(*) > 5);
 drop table t_in_csq_count;
