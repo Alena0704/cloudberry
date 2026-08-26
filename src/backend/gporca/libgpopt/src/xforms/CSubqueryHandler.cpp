@@ -1646,9 +1646,11 @@ CSubqueryHandler::FRemoveAnySubquery(CExpression *pexprOuter,
 	{
 		GPOS_ASSERT(EsqctxtFilter == esqctxt);
 
-		CColRef *pcrCount = NULL;
-		if (CUtils::FHasCountAgg(pexprInner, &pcrCount) &&
-			1 >= pexprInner->DeriveMaxCard().Ull())
+		const CLogicalGbAgg *pgbAgg = NULL;
+		if (COperator::EopLogicalGbAgg == pexprInner->Pop()->Eopid() &&
+			CUtils::FHasCountAggMatchingColumn(pexprInner, colref, &pgbAgg) &&
+			pgbAgg == CLogicalGbAgg::PopConvert(pexprInner->Pop()) &&
+			0 == pgbAgg->Pdrgpcr()->Size())
 		{
 			// "a IN (SELECT count(*) ...)": a correlated scalar count() is
 			// single-valued, so IN is equivalent to "a = (SELECT count(*) ...)".
@@ -1657,6 +1659,14 @@ CSubqueryHandler::FRemoveAnySubquery(CExpression *pexprOuter,
 			// a LEFT outer apply that keeps every outer row and compare the outer
 			// value against coalesce(count, 0), so the empty-group count of 0
 			// survives decorrelation into a LEFT outer join.
+			//
+			// This is only valid when the subquery's output column IS a bare
+			// count() computed by a GROUP BY () aggregate at the subquery root:
+			// exactly one row is produced and its empty-input value is 0.
+			// Anything sitting above the aggregate -- a projection (count()+1
+			// is 1 over empty input, not 0), a HAVING filter or a limit (the
+			// row may disappear entirely, and IN over an empty set is false) --
+			// breaks that equivalence, so those shapes keep the semi-join.
 			pexprSelect->Release();
 
 			pexprInner->AddRef();
