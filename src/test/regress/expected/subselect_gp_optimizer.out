@@ -4151,3 +4151,20 @@ reset optimizer;
 drop table outer_foo;
 drop table inner_bar;
 drop table t;
+
+-- Correlated count() subquery under IN: ORCA used to decorrelate this into a
+-- semi-join, dropping outer rows whose correlated group is empty and losing
+-- the count()=0 match. It must build a LEFT outer apply and compare against
+-- coalesce(count, 0) instead, so the no-match row survives.
+create table t_in_csq_count(a int, b int) distributed by (a);
+insert into t_in_csq_count values (0, 1);
+-- no matching group for a=0: the subquery yields count()=0 and the row
+-- must be returned
+select * from t_in_csq_count x
+where x.a in (select count(*) from t_in_csq_count y where y.b = x.a);
+ a | b 
+---+---
+ 0 | 1
+(1 row)
+
+drop table t_in_csq_count;
