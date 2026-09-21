@@ -133,7 +133,8 @@ _PG_init(void)
 	DefineCustomBoolVariable("vacuum_statistics.enabled",
 							 "Enable extended vacuum statistics collection.",
 							 NULL, &evs_enabled, true,
-							 PGC_SUSET, 0, NULL, NULL, NULL);
+							 PGC_SUSET, GUC_GPDB_NEED_SYNC,
+							 NULL, NULL, NULL);
 
 	MarkGUCPrefixReserved(SJ_NODENAME);
 

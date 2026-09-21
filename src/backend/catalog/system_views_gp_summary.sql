@@ -86,6 +86,12 @@ SELECT
     max(sdb.checksum_last_failure) as checksum_last_failure,
     sum(sdb.blk_read_time) as blk_read_time,
     sum(sdb.blk_write_time) as blk_write_time,
+    sum(sdb.total_vacuum_time) as total_vacuum_time,
+    sum(sdb.total_autovacuum_time) as total_autovacuum_time,
+    sum(sdb.total_vacuum_delay_time) as total_vacuum_delay_time,
+    sum(sdb.total_autovacuum_delay_time) as total_autovacuum_delay_time,
+    max(sdb.vacuum_failsafe_count) as vacuum_failsafe_count,
+    max(sdb.vacuum_interrupt_count) as vacuum_interrupt_count,
     max(sdb.stats_reset) as stats_reset
 FROM
     gp_stat_database sdb

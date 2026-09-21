@@ -192,3 +192,204 @@ LEFT JOIN LATERAL ext_vacuum_statistics.pg_stats_get_vacuum_database(db.oid) sta
 
 COMMENT ON VIEW ext_vacuum_statistics.pg_stats_vacuum_database IS
   'Extended vacuum statistics per database (aggregate)';
+
+--
+-- Cloudberry: cluster-wide views.
+--
+-- Every instance of the cluster keeps the statistics of the vacuums it runs
+-- itself, and the pg_stats_vacuum_* views above only show those of the
+-- instance they are queried on.  The gp_stats_vacuum_* views show the rows
+-- of all instances, with the gp_segment_id of each (-1 for the
+-- coordinator), like the gp_stat_* views of the core.
+--
+CREATE VIEW ext_vacuum_statistics.gp_stats_vacuum_tables AS
+SELECT gp_execution_segment() AS gp_segment_id, *
+  FROM gp_dist_random('ext_vacuum_statistics.pg_stats_vacuum_tables')
+UNION ALL
+SELECT -1 AS gp_segment_id, *
+  FROM ext_vacuum_statistics.pg_stats_vacuum_tables;
+
+COMMENT ON VIEW ext_vacuum_statistics.gp_stats_vacuum_tables IS
+  'Extended vacuum statistics per table, on every instance of the cluster';
+
+CREATE VIEW ext_vacuum_statistics.gp_stats_vacuum_indexes AS
+SELECT gp_execution_segment() AS gp_segment_id, *
+  FROM gp_dist_random('ext_vacuum_statistics.pg_stats_vacuum_indexes')
+UNION ALL
+SELECT -1 AS gp_segment_id, *
+  FROM ext_vacuum_statistics.pg_stats_vacuum_indexes;
+
+COMMENT ON VIEW ext_vacuum_statistics.gp_stats_vacuum_indexes IS
+  'Extended vacuum statistics per index, on every instance of the cluster';
+
+CREATE VIEW ext_vacuum_statistics.gp_stats_vacuum_database AS
+SELECT gp_execution_segment() AS gp_segment_id, *
+  FROM gp_dist_random('ext_vacuum_statistics.pg_stats_vacuum_database')
+UNION ALL
+SELECT -1 AS gp_segment_id, *
+  FROM ext_vacuum_statistics.pg_stats_vacuum_database;
+
+COMMENT ON VIEW ext_vacuum_statistics.gp_stats_vacuum_database IS
+  'Extended vacuum statistics per database, on every instance of the cluster';
+
+--
+-- The *_summary views add the numbers up over the cluster, the way the
+-- gp_stat_*_summary views of the core do: user relations are summed over
+-- the segments (a replicated table is stored and vacuumed in full on every
+-- segment, so its sums are divided by the number of segments), and the
+-- system catalogs, which every instance keeps its own copy of, are shown as
+-- the coordinator counts them.
+--
+CREATE VIEW ext_vacuum_statistics.gp_stats_vacuum_tables_summary AS
+SELECT
+  s.relid,
+  s.schema,
+  s.relname,
+  s.dbname,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.total_blks_read) / d.numsegments)::bigint ELSE sum(s.total_blks_read)::bigint END AS total_blks_read,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.total_blks_hit) / d.numsegments)::bigint ELSE sum(s.total_blks_hit)::bigint END AS total_blks_hit,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.total_blks_dirtied) / d.numsegments)::bigint ELSE sum(s.total_blks_dirtied)::bigint END AS total_blks_dirtied,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.total_blks_written) / d.numsegments)::bigint ELSE sum(s.total_blks_written)::bigint END AS total_blks_written,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.wal_records) / d.numsegments)::bigint ELSE sum(s.wal_records)::bigint END AS wal_records,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.wal_fpi) / d.numsegments)::bigint ELSE sum(s.wal_fpi)::bigint END AS wal_fpi,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.wal_bytes) / d.numsegments) ELSE sum(s.wal_bytes) END AS wal_bytes,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.blk_read_time) / d.numsegments) ELSE sum(s.blk_read_time) END AS blk_read_time,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.blk_write_time) / d.numsegments) ELSE sum(s.blk_write_time) END AS blk_write_time,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.rel_blks_read) / d.numsegments)::bigint ELSE sum(s.rel_blks_read)::bigint END AS rel_blks_read,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.rel_blks_hit) / d.numsegments)::bigint ELSE sum(s.rel_blks_hit)::bigint END AS rel_blks_hit,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.tuples_deleted) / d.numsegments)::bigint ELSE sum(s.tuples_deleted)::bigint END AS tuples_deleted,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.pages_scanned) / d.numsegments)::bigint ELSE sum(s.pages_scanned)::bigint END AS pages_scanned,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.pages_removed) / d.numsegments)::bigint ELSE sum(s.pages_removed)::bigint END AS pages_removed,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.tuples_frozen) / d.numsegments)::bigint ELSE sum(s.tuples_frozen)::bigint END AS tuples_frozen,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.recently_dead_tuples) / d.numsegments)::bigint ELSE sum(s.recently_dead_tuples)::bigint END AS recently_dead_tuples,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.missed_dead_pages) / d.numsegments)::bigint ELSE sum(s.missed_dead_pages)::bigint END AS missed_dead_pages,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.missed_dead_tuples) / d.numsegments)::bigint ELSE sum(s.missed_dead_tuples)::bigint END AS missed_dead_tuples
+FROM gp_dist_random('ext_vacuum_statistics.pg_stats_vacuum_tables') s
+LEFT JOIN gp_distribution_policy d ON d.localoid = s.relid
+WHERE s.relid >= 16384
+GROUP BY s.relid, s.schema, s.relname, s.dbname, d.policytype, d.numsegments
+UNION ALL
+SELECT
+  relid,
+  schema,
+  relname,
+  dbname,
+  total_blks_read,
+  total_blks_hit,
+  total_blks_dirtied,
+  total_blks_written,
+  wal_records,
+  wal_fpi,
+  wal_bytes,
+  blk_read_time,
+  blk_write_time,
+  rel_blks_read,
+  rel_blks_hit,
+  tuples_deleted,
+  pages_scanned,
+  pages_removed,
+  tuples_frozen,
+  recently_dead_tuples,
+  missed_dead_pages,
+  missed_dead_tuples
+FROM ext_vacuum_statistics.pg_stats_vacuum_tables
+WHERE relid < 16384;
+
+COMMENT ON VIEW ext_vacuum_statistics.gp_stats_vacuum_tables_summary IS
+  'Extended vacuum statistics per table, summed over the cluster';
+
+CREATE VIEW ext_vacuum_statistics.gp_stats_vacuum_indexes_summary AS
+SELECT
+  s.indexrelid,
+  s.schema,
+  s.indexrelname,
+  s.dbname,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.total_blks_read) / d.numsegments)::bigint ELSE sum(s.total_blks_read)::bigint END AS total_blks_read,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.total_blks_hit) / d.numsegments)::bigint ELSE sum(s.total_blks_hit)::bigint END AS total_blks_hit,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.total_blks_dirtied) / d.numsegments)::bigint ELSE sum(s.total_blks_dirtied)::bigint END AS total_blks_dirtied,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.total_blks_written) / d.numsegments)::bigint ELSE sum(s.total_blks_written)::bigint END AS total_blks_written,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.wal_records) / d.numsegments)::bigint ELSE sum(s.wal_records)::bigint END AS wal_records,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.wal_fpi) / d.numsegments)::bigint ELSE sum(s.wal_fpi)::bigint END AS wal_fpi,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.wal_bytes) / d.numsegments) ELSE sum(s.wal_bytes) END AS wal_bytes,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.blk_read_time) / d.numsegments) ELSE sum(s.blk_read_time) END AS blk_read_time,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.blk_write_time) / d.numsegments) ELSE sum(s.blk_write_time) END AS blk_write_time,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.rel_blks_read) / d.numsegments)::bigint ELSE sum(s.rel_blks_read)::bigint END AS rel_blks_read,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.rel_blks_hit) / d.numsegments)::bigint ELSE sum(s.rel_blks_hit)::bigint END AS rel_blks_hit,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.tuples_deleted) / d.numsegments)::bigint ELSE sum(s.tuples_deleted)::bigint END AS tuples_deleted,
+  CASE WHEN d.policytype = 'r' THEN (sum(s.pages_deleted) / d.numsegments)::bigint ELSE sum(s.pages_deleted)::bigint END AS pages_deleted
+FROM gp_dist_random('ext_vacuum_statistics.pg_stats_vacuum_indexes') s
+JOIN pg_index i ON i.indexrelid = s.indexrelid
+LEFT JOIN gp_distribution_policy d ON d.localoid = i.indrelid
+WHERE s.indexrelid >= 16384
+GROUP BY s.indexrelid, s.schema, s.indexrelname, s.dbname, d.policytype, d.numsegments
+UNION ALL
+SELECT
+  indexrelid,
+  schema,
+  indexrelname,
+  dbname,
+  total_blks_read,
+  total_blks_hit,
+  total_blks_dirtied,
+  total_blks_written,
+  wal_records,
+  wal_fpi,
+  wal_bytes,
+  blk_read_time,
+  blk_write_time,
+  rel_blks_read,
+  rel_blks_hit,
+  tuples_deleted,
+  pages_deleted
+FROM ext_vacuum_statistics.pg_stats_vacuum_indexes
+WHERE indexrelid < 16384;
+
+COMMENT ON VIEW ext_vacuum_statistics.gp_stats_vacuum_indexes_summary IS
+  'Extended vacuum statistics per index, summed over the cluster';
+
+-- The database aggregates are summed over all instances, the coordinator
+-- included: they are the vacuum work done in the database cluster-wide.
+CREATE VIEW ext_vacuum_statistics.gp_stats_vacuum_database_summary AS
+SELECT
+  dboid,
+  dbname,
+  sum(db_blks_read)::bigint AS db_blks_read,
+  sum(db_blks_hit)::bigint AS db_blks_hit,
+  sum(db_blks_dirtied)::bigint AS db_blks_dirtied,
+  sum(db_blks_written)::bigint AS db_blks_written,
+  sum(db_wal_records)::bigint AS db_wal_records,
+  sum(db_wal_fpi)::bigint AS db_wal_fpi,
+  sum(db_wal_bytes) AS db_wal_bytes,
+  sum(db_blk_read_time) AS db_blk_read_time,
+  sum(db_blk_write_time) AS db_blk_write_time
+FROM ext_vacuum_statistics.gp_stats_vacuum_database
+GROUP BY dboid, dbname;
+
+COMMENT ON VIEW ext_vacuum_statistics.gp_stats_vacuum_database_summary IS
+  'Extended vacuum statistics per database, summed over the cluster';
+
+--
+-- Cloudberry: resetting on the whole cluster.  The reset functions above act
+-- on the instance they are called on; these run them on the coordinator and
+-- on every segment.
+--
+CREATE FUNCTION ext_vacuum_statistics.gp_vacuum_statistics_reset()
+RETURNS void
+AS $$
+  SELECT ext_vacuum_statistics.vacuum_statistics_reset() FROM gp_dist_random('gp_id');
+  SELECT ext_vacuum_statistics.vacuum_statistics_reset();
+$$ LANGUAGE sql VOLATILE;
+
+CREATE FUNCTION ext_vacuum_statistics.gp_extvac_reset_entry(dboid oid, relid oid)
+RETURNS void
+AS $$
+  SELECT ext_vacuum_statistics.extvac_reset_entry(dboid, relid) FROM gp_dist_random('gp_id');
+  SELECT ext_vacuum_statistics.extvac_reset_entry(dboid, relid);
+$$ LANGUAGE sql STRICT VOLATILE;
+
+CREATE FUNCTION ext_vacuum_statistics.gp_extvac_reset_db_entry(dboid oid)
+RETURNS void
+AS $$
+  SELECT ext_vacuum_statistics.extvac_reset_db_entry(dboid) FROM gp_dist_random('gp_id');
+  SELECT ext_vacuum_statistics.extvac_reset_db_entry(dboid);
+$$ LANGUAGE sql STRICT VOLATILE;

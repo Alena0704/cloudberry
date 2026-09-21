@@ -109,5 +109,27 @@ gpconfig -c shared_preload_libraries -v '<existing libraries>,ext_vacuum_statist
 gpstop -ar
 ```
 
+Cluster-wide views, like the `gp_stat_*` views of the core:
+
+| View | Description |
+|------|-------------|
+| `ext_vacuum_statistics.gp_stats_vacuum_tables` | `pg_stats_vacuum_tables` of every instance, with `gp_segment_id` (-1 for the coordinator) |
+| `ext_vacuum_statistics.gp_stats_vacuum_indexes` | the same for indexes |
+| `ext_vacuum_statistics.gp_stats_vacuum_database` | the same for databases |
+| `ext_vacuum_statistics.gp_stats_vacuum_tables_summary` | one row per table: summed over the segments (divided by their number for replicated tables); catalogs as on the coordinator |
+| `ext_vacuum_statistics.gp_stats_vacuum_indexes_summary` | the same for indexes |
+| `ext_vacuum_statistics.gp_stats_vacuum_database_summary` | one row per database, summed over all instances |
+
+The reset functions act on the instance they are called on;
+`gp_vacuum_statistics_reset()`, `gp_extvac_reset_entry(dboid, relid)` and
+`gp_extvac_reset_db_entry(dboid)` run them on the whole cluster.  A `SET` of
+`vacuum_statistics.enabled` on the coordinator is passed on to the segments.
+
 The statistics are not replicated: after a failover the promoted mirror starts
 with empty statistics, as with the built-in cumulative statistics.
+
+The test of the cluster-wide views runs against such a cluster:
+
+```
+make -C contrib/ext_vacuum_statistics installcheck-cluster
+```

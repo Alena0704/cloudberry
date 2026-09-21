@@ -630,10 +630,60 @@
    Every instance of the cluster, the coordinator and each segment, keeps
    the statistics of the vacuums it runs itself: a <command>VACUUM</command>
    issued on the coordinator is dispatched to the segments, and each segment
-   vacuums and counts its own part of the tables.  The views of the module
-   show the statistics of the instance they are queried on, so on the
-   coordinator they show only what the coordinator itself vacuumed, which
-   for distributed tables is next to nothing.
+   vacuums and counts its own part of the tables.  The
+   <structname>pg_stats_vacuum_*</structname> views show the statistics of
+   the instance they are queried on, so on the coordinator they show only
+   what the coordinator itself vacuumed, which for distributed tables is next
+   to nothing.  The module therefore also provides cluster-wide views, which
+   query every instance:
+  </para>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     <structname>ext_vacuum_statistics.gp_stats_vacuum_tables</structname>,
+     <structname>ext_vacuum_statistics.gp_stats_vacuum_indexes</structname> and
+     <structname>ext_vacuum_statistics.gp_stats_vacuum_database</structname>
+     have the columns of the corresponding <structname>pg_stats_vacuum_*</structname>
+     view, preceded by <structfield>gp_segment_id</structfield>: one row per
+     instance, <literal>-1</literal> being the coordinator, like the
+     <structname>gp_stat_*</structname> views of the core.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <structname>ext_vacuum_statistics.gp_stats_vacuum_tables_summary</structname>
+     and <structname>ext_vacuum_statistics.gp_stats_vacuum_indexes_summary</structname>
+     have one row per relation, like the
+     <structname>gp_stat_*_summary</structname> views of the core: the
+     counters of user relations are summed over the segments, divided by the
+     number of segments for replicated tables, which every segment stores and
+     vacuums in full; system catalogs are shown as the coordinator counts
+     them.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <structname>ext_vacuum_statistics.gp_stats_vacuum_database_summary</structname>
+     sums the database aggregates over all instances, the coordinator
+     included.
+    </para>
+   </listitem>
+  </itemizedlist>
+
+  <para>
+   Like the other <structname>gp_*</structname> views, the cluster-wide views
+   must not be queried in utility mode, where they read the local instance
+   twice.
+  </para>
+
+  <para>
+   The reset functions act on the instance they are called on.
+   <function>ext_vacuum_statistics.gp_vacuum_statistics_reset()</function>,
+   <function>ext_vacuum_statistics.gp_extvac_reset_entry(<parameter>dboid</parameter>, <parameter>relid</parameter>)</function>
+   and
+   <function>ext_vacuum_statistics.gp_extvac_reset_db_entry(<parameter>dboid</parameter>)</function>
+   call them on the coordinator and on every segment.
   </para>
 
   <para>
@@ -660,8 +710,9 @@ gpstop -ar
 
   <para>
    <varname>vacuum_statistics.enabled</varname> is read by the instance that
-   runs the vacuum, so to stop collecting in the whole cluster set it with
-   <command>gpconfig</command> and reload the configuration
+   runs the vacuum.  A <command>SET</command> on the coordinator is passed on
+   to the segments of the session; to stop collecting in the whole cluster,
+   set it with <command>gpconfig</command> and reload the configuration
    (<command>gpstop -u</command>).
   </para>
  </sect2>
