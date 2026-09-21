@@ -68,6 +68,11 @@ Each tracked object (table or index) uses a fixed-size shared memory entry; the 
 
 Example: a database with 1000 tables and 2000 indexes, all tracked, uses about **700 KB** on Ubuntu (3001 entries × 232 bytes). Per-database entries add one entry per tracked database.
 
+The entry of a table or an index is dropped when the relation is dropped (at
+commit, so a rolled back `DROP` keeps it), and a new relation that gets the OID
+of an old one starts from zero.  The module does that with an
+`object_access_hook`.
+
 ## Recipes
 
 **Disable statistics collection temporarily:**

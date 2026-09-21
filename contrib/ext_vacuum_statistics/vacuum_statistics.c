@@ -8,6 +8,8 @@
  */
 #include "postgres.h"
 
+#include "catalog/objectaccess.h"
+#include "catalog/pg_class.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -34,10 +36,13 @@ static bool evs_enabled = true;
 
 /*  Hooks  */
 static set_report_vacuum_hook_type prev_report_vacuum_hook = NULL;
+static object_access_hook_type prev_object_access_hook = NULL;
 
 /*  Forward declarations  */
 static void pgstat_report_vacuum_extstats(Oid tableoid, bool shared,
 										  PgStat_VacuumRelationCounts * params);
+static void extvac_object_access(ObjectAccessType access, Oid classId,
+								 Oid objectId, int subId, void *arg);
 
 /* Shared memory entry for vacuum stats; one per relation or database. */
 typedef struct PgStatShared_ExtVacEntry
@@ -137,6 +142,50 @@ _PG_init(void)
 
 	prev_report_vacuum_hook = set_report_vacuum_hook;
 	set_report_vacuum_hook = pgstat_report_vacuum_extstats;
+
+	prev_object_access_hook = object_access_hook;
+	object_access_hook = extvac_object_access;
+}
+
+/*
+ * Object access hook: drop the statistics of a dropped relation, and reset
+ * old statistics when a new relation is created.
+ *
+ * Otherwise the statistics of a dropped relation stay in memory and in the
+ * statistics file, and a new relation with the same OID gets them.  Both
+ * actions are transactional, as for the built-in relation statistics.
+ *
+ * Statistics are keyed by the relation OID, and shared catalogs are never
+ * created or dropped after initdb, so we do not need to read pg_class.
+ *
+ * Dropped databases need no handling: dropping a database drops all its
+ * statistics entries, ours included.
+ */
+static void
+extvac_object_access(ObjectAccessType access, Oid classId, Oid objectId,
+					 int subId, void *arg)
+{
+	if (prev_object_access_hook)
+		prev_object_access_hook(access, classId, objectId, subId, arg);
+
+	/* only whole relations are of interest, not their columns */
+	if (classId != RelationRelationId || subId != 0)
+		return;
+
+	if (access == OAT_DROP)
+		pgstat_drop_transactional(PGSTAT_KIND_EXTVAC_RELATION, MyDatabaseId,
+								  objectId);
+	else if (access == OAT_POST_CREATE)
+	{
+		/*
+		 * Discard whatever an earlier owner of this OID left behind, and
+		 * arrange for the entry to be dropped again should the creating
+		 * transaction roll back.  This mirrors what pgstat_create_relation()
+		 * does for the built-in relation statistics.
+		 */
+		pgstat_create_transactional(PGSTAT_KIND_EXTVAC_RELATION, MyDatabaseId,
+									objectId);
+	}
 }
 
 /* Accumulate common counts for database-level stats. */

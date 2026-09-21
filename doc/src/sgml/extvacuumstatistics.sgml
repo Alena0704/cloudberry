@@ -50,6 +50,17 @@
   memory entry; the exact size depends on the platform.
  </para>
 
+ <para>
+  The statistics of a table or an index are dropped together with it, when
+  the transaction that drops it commits, and a new table or index starts
+  from empty statistics even if it gets the OID of an old one; both work
+  the way they do for the built-in relation statistics.  The module does
+  that with an <literal>object_access_hook</literal>, so the statistics file
+  does not accumulate the entries of relations long gone.  The statistics
+  of a dropped database are dropped along with the rest of its cumulative
+  statistics.
+ </para>
+
  <sect2 id="extvacuumstatistics-pg-stats-vacuum-tables">
   <title>The <structname>ext_vacuum_statistics.pg_stats_vacuum_tables</structname> View</title>
 
