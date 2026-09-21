@@ -20,3 +20,22 @@ install_data(
   'ext_vacuum_statistics--1.0.sql',
   kwargs: contrib_data_args,
 )
+
+tests += {
+  'name': 'ext_vacuum_statistics',
+  'sd': meson.current_source_dir(),
+  'bd': meson.current_build_dir(),
+  'isolation': {
+    'specs': [
+      'vacuum-extending-in-repetable-read',
+    ],
+    'regress_args': ['--temp-config', files('ext_vacuum_statistics.conf')],
+    'runningcheck': false,
+  },
+  'tap': {
+    'tests': [
+      't/052_vacuum_extending_basic_test.pl',
+      't/054_vacuum_extending_gucs_test.pl',
+    ],
+  },
+}
