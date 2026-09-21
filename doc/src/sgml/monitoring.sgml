@@ -4664,7 +4664,13 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
        <structfield>vacuum_interrupt_count</structfield> <type>bigint</type>
       </para>
       <para>
-       Number of times a vacuum in this database was interrupted by an error
+       Number of times a vacuum in this database was interrupted by an error,
+       the vacuum of an append-optimized table included.  In a Cloudberry
+       cluster the count is kept by the instance on which the vacuum failed:
+       a vacuum dispatched to the segments that fails there is counted by
+       those segments, not by the coordinator.  A segment reports the count
+       once its part of the failed distributed transaction has ended, which
+       may be as late as the next command of the session.
       </para></entry>
      </row>
 
@@ -5038,7 +5044,9 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
       </para>
       <para>
        Number of vacuums of this table that entered the wraparound failsafe
-       mode (see <xref linkend="guc-vacuum-failsafe-age"/>)
+       mode (see <xref linkend="guc-vacuum-failsafe-age"/>).  Always zero for
+       append-optimized tables, which have no tuple transaction IDs to
+       freeze.
       </para></entry>
      </row>
 
@@ -5146,7 +5154,8 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
        <command>VACUUM</command> or autovacuum).  The page must then be
        processed again by vacuum on a subsequent run.  A high rate of
        change in this counter means that vacuum has to repeatedly
-       re-process pages of this table.
+       re-process pages of this table.  Always zero for append-optimized
+       tables, which have no visibility map.
       </para></entry>
      </row>
 
@@ -5161,7 +5170,8 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
        whenever a backend process modifies a page that was previously
        marked all-frozen by vacuum activity (manual <command>VACUUM</command>
        or autovacuum).  The page must then be processed again by vacuum on
-       the next freeze run for this table.
+       the next freeze run for this table.  Always zero for append-optimized
+       tables.
       </para></entry>
      </row>
 

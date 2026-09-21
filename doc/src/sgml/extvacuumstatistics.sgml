@@ -623,6 +623,57 @@
   </variablelist>
  </sect2>
 
+ <sect2 id="extvacuumstatistics-append-optimized">
+  <title>Append-Optimized Tables</title>
+
+  <para>
+   Append-optimized tables, row- and column-oriented, and their indexes are
+   reported like heap tables, with the counters that have a meaning for
+   their storage:
+  </para>
+
+  <itemizedlist>
+   <listitem>
+    <para>
+     <structfield>tuples_deleted</structfield> of the table is the number of
+     dead tuples that the compaction of its segment files discarded, and
+     <structfield>pages_removed</structfield> the space released by
+     truncating segment files and dropping compacted ones, in heap-equivalent
+     pages of <xref linkend="guc-block-size"/> bytes.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     <structfield>pages_scanned</structfield>,
+     <structfield>tuples_frozen</structfield>,
+     <structfield>recently_dead_tuples</structfield>,
+     <structfield>missed_dead_tuples</structfield> and
+     <structfield>missed_dead_pages</structfield> have no append-optimized
+     counterpart and stay zero.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     The vacuum of an append-optimized table runs in phases (pre-cleanup,
+     compaction, post-cleanup), each dispatched as a step of its own.  The
+     buffer, WAL and I/O timing counters of the table cover all the phases
+     of a vacuum, and the vacuum is reported once, at the end of the last
+     one; a vacuum that fails in between reports nothing.
+    </para>
+   </listitem>
+   <listitem>
+    <para>
+     The compaction moves the live tuples of a segment file to another one,
+     so the index pass that follows removes the index entries of all tuples
+     of the compacted file: <structfield>tuples_deleted</structfield> of an
+     index counts the moved live tuples too, not only the dead ones.  As for
+     heap tables, the resource usage of the index passes is reported with
+     the indexes and not counted again with the table.
+    </para>
+   </listitem>
+  </itemizedlist>
+ </sect2>
+
  <sect2 id="extvacuumstatistics-cloudberry">
   <title>Using the Module in a Cloudberry Cluster</title>
 

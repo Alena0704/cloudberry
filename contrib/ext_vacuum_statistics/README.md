@@ -97,6 +97,18 @@ SET vacuum_statistics.enabled = off;
   built-in ones included.  Use `vacuum_statistics.enabled = off` rather than
   removing the module.
 
+## Append-optimized tables
+
+AO row and AOCS tables and their indexes are reported too.  For the table,
+`tuples_deleted` is the number of dead tuples the compaction discarded and
+`pages_removed` the space released by truncating and dropping segment files,
+in heap-equivalent pages; the heap-only counters (`pages_scanned`,
+`tuples_frozen`, `recently_dead_tuples`, `missed_dead_*`) stay zero.  The
+resource usage covers all phases of the vacuum, which is reported at the end
+of the last one.  The compaction moves live tuples to another segment file,
+so an index's `tuples_deleted` counts the entries of the moved live tuples
+too.
+
 ## Cloudberry
 
 Each instance (the coordinator and every segment) keeps the statistics of the
