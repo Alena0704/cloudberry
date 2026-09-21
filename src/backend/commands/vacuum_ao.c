@@ -307,7 +307,9 @@ ao_vacuum_rel_post_cleanup(Relation onerel, VacuumParams *params, BufferAccessSt
 						 onerel->rd_rel->relisshared,
 						 reltuples,
 						 deadtuples,
-						 vacrelstats->starttime);
+						 vacrelstats->starttime,
+						 0,			/* delay time is not tracked for AO tables */
+						 false);	/* no failsafe mode for AO tables */
 
 	SIMPLE_FAULT_INJECTOR("vacuum_ao_post_cleanup_end");
 }
