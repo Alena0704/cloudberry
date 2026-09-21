@@ -28,4 +28,4 @@ endif
 # temporary instances of "make check" are not, so it has a target of its
 # own, run against such a cluster.
 installcheck-cluster:
-	$(pg_regress_installcheck) --dbname=contrib_regression_vacstat gp_vacuum_statistics
+	$(pg_regress_installcheck) --dbname=contrib_regression_vacstat gp_vacuum_statistics gp_vacuum_statistics_ao
