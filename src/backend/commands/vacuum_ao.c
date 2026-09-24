@@ -114,6 +114,8 @@
  */
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/table.h"
 #include "access/aocs_compaction.h"
 #include "access/aomd.h"
@@ -150,7 +152,8 @@ static void vacuum_appendonly_index(Relation indexRelation,
 									Bitmapset *dead_segs,
 									int elevel,
 									BufferAccessStrategy bstrategy,
-									AOVacuumRelStats *vacrelstats);
+									AOVacuumRelStats *vacrelstats,
+									IndexBulkDeleteResult *result);
 
 static bool appendonly_tid_reaped(ItemPointer itemptr, void *state);
 
@@ -163,6 +166,17 @@ static void ao_vacuum_rel_recycle_dead_segments(Relation onerel, VacuumParams *p
 												BufferAccessStrategy bstrategy, AOVacuumRelStats *vacrelstats);
 static AOVacuumRelStats *init_vacrelstats(void);
 static void cleanup_vacrelstats(AOVacuumRelStats **vacrelstatsp);
+static void ao_report_index_vacuum_time(Relation indrel, TimestampTz starttime,
+										double startdelaytime);
+static void ao_vacuum_error_callback(void *arg);
+static void ao_accum_resources(PgStat_CommonCounts *dst,
+							   const PgStat_CommonCounts *src, bool subtract);
+static void ao_report_index_extstats(Relation indrel,
+									 LVExtStatCounters *counters,
+									 IndexBulkDeleteResult *result,
+									 AOVacuumRelStats *vacrelstats);
+static void ao_report_table_extstats(Relation rel,
+									 AOVacuumRelStats *vacrelstats);
 
 static void
 ao_vacuum_rel_pre_cleanup(Relation onerel, VacuumParams *params, BufferAccessStrategy bstrategy, AOVacuumRelStats *vacrelstats)
@@ -306,7 +320,11 @@ ao_vacuum_rel_post_cleanup(Relation onerel, VacuumParams *params, BufferAccessSt
 	pgstat_report_vacuum(RelationGetRelid(onerel),
 						 onerel->rd_rel->relisshared,
 						 reltuples,
-						 deadtuples);
+						 deadtuples,
+						 vacrelstats->starttime,
+						 (PgStat_Counter) rint(VacuumDelayTime -
+											   vacrelstats->startdelaytime),
+						 false);	/* no failsafe mode for AO tables */
 
 	SIMPLE_FAULT_INJECTOR("vacuum_ao_post_cleanup_end");
 }
@@ -416,6 +434,13 @@ init_vacrelstats()
 	vacrelstats = (AOVacuumRelStats *) palloc0(sizeof(AOVacuumRelStats));
 	MemoryContextSwitchTo(old_context);
 
+	/*
+	 * The phases of an AO vacuum run as separate steps, all of them sharing
+	 * these stats; time the vacuum from the first one.
+	 */
+	vacrelstats->starttime = GetCurrentTimestamp();
+	vacrelstats->startdelaytime = VacuumDelayTime;
+
 	return vacrelstats;
 }
 
@@ -428,10 +453,27 @@ void
 ao_vacuum_rel(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy)
 {
 	static AOVacuumRelStats *vacrelstats = NULL;
+	ErrorContextCallback errcallback;
+	LVExtStatCounters extcounters;
+	bool		extstats = (set_report_vacuum_hook != NULL);
 	Assert(RelationStorageIsAO(rel));
 	Assert(params != NULL);
 
 	int ao_vacuum_phase = (params->options & VACUUM_AO_PHASE_MASK);
+
+	/*
+	 * The phases of one vacuum share these stats and free them at the end of
+	 * the last phase, so a vacuum that failed in between leaves them behind.
+	 * Drop such leftovers: otherwise the counters and, worse, the start time
+	 * of the failed vacuum are taken for the next one, whose cumulative
+	 * vacuum time then includes everything that happened in between, and
+	 * whose progress is never reported because the progress command is only
+	 * started along with the stats.
+	 */
+	if (vacrelstats != NULL &&
+		(ao_vacuum_phase == VACOPT_AO_PRE_CLEANUP_PHASE ||
+		 vacrelstats->relid != RelationGetRelid(rel)))
+		cleanup_vacrelstats(&vacrelstats);
 
 	if (!vacrelstats)
 	{
@@ -450,7 +492,18 @@ ao_vacuum_rel(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 
 		pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM, RelationGetRelid(rel));
 		vacrelstats = init_vacrelstats();
+		vacrelstats->relid = RelationGetRelid(rel);
 	}
+
+	/* Count the vacuums of the relation that an error interrupts */
+	errcallback.callback = ao_vacuum_error_callback;
+	errcallback.arg = rel;
+	errcallback.previous = error_context_stack;
+	error_context_stack = &errcallback;
+
+	/* Sample the resource usage of the phase for the extended statistics */
+	if (extstats)
+		extvac_stats_start(rel, &extcounters);
 
 	/*
 	 * Do the actual work --- either FULL or "lazy" vacuum
@@ -460,14 +513,153 @@ ao_vacuum_rel(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 	else if (ao_vacuum_phase == VACOPT_AO_COMPACT_PHASE)
 		ao_vacuum_rel_compact(rel, params, bstrategy, vacrelstats);
 	else if (ao_vacuum_phase == VACOPT_AO_POST_CLEANUP_PHASE)
-	{
 		ao_vacuum_rel_post_cleanup(rel, params, bstrategy, vacrelstats);
-		pgstat_progress_end_command();
-		cleanup_vacrelstats(&vacrelstats);
-	}
 	else
 		/* Do nothing here, we will launch the stages later */
 		Assert(ao_vacuum_phase == 0);
+
+	if (extstats && ao_vacuum_phase != 0)
+	{
+		PgStat_CommonCounts phase;
+
+		memset(&phase, 0, sizeof(phase));
+		extvac_stats_end(rel, &extcounters, &phase);
+		ao_accum_resources(&vacrelstats->extphases, &phase, false);
+	}
+
+	if (ao_vacuum_phase == VACOPT_AO_POST_CLEANUP_PHASE)
+	{
+		/* the last phase: report the vacuum as a whole */
+		if (extstats)
+			ao_report_table_extstats(rel, vacrelstats);
+		pgstat_progress_end_command();
+		cleanup_vacrelstats(&vacrelstats);
+	}
+
+	error_context_stack = errcallback.previous;
+}
+
+/*
+ * Error context callback of an append-optimized vacuum phase.
+ *
+ * Like vacuum_error_callback() of the heap, count a vacuum interrupted by an
+ * actual ERROR, not by a lower-severity report that merely carries this
+ * context, in vacuum_interrupt_count of the database.  We are inside the
+ * error handler, so pgstat_count_vacuum_error() only bumps a counter.  The
+ * callback adds no context line: the phases report their own progress.
+ */
+static void
+ao_vacuum_error_callback(void *arg)
+{
+	Relation	rel = (Relation) arg;
+
+	if (geterrlevel() == ERROR)
+		pgstat_count_vacuum_error(rel->rd_rel->relisshared);
+}
+
+/*
+ * Accumulate one vacuum pass over an index of an append-optimized table
+ * into the index's cumulative vacuum and delay times, as the heap does in
+ * lazy_vacuum_one_index() and lazy_cleanup_one_index().
+ */
+static void
+ao_report_index_vacuum_time(Relation indrel, TimestampTz starttime,
+							double startdelaytime)
+{
+	pgstat_report_index_vacuum_time(indrel,
+									TimestampDifferenceMilliseconds(starttime,
+																	GetCurrentTimestamp()),
+									(PgStat_Counter) rint(VacuumDelayTime -
+														  startdelaytime),
+									IsAutoVacuumWorkerProcess());
+}
+
+/*
+ * Add the resource usage counters of src to dst, or subtract them from it.
+ * The tuple counter is left alone.
+ */
+static void
+ao_accum_resources(PgStat_CommonCounts *dst, const PgStat_CommonCounts *src,
+				   bool subtract)
+{
+	if (subtract)
+	{
+		dst->total_blks_read -= src->total_blks_read;
+		dst->total_blks_hit -= src->total_blks_hit;
+		dst->total_blks_dirtied -= src->total_blks_dirtied;
+		dst->total_blks_written -= src->total_blks_written;
+		dst->blks_fetched -= src->blks_fetched;
+		dst->blks_hit -= src->blks_hit;
+		dst->blk_read_time -= src->blk_read_time;
+		dst->blk_write_time -= src->blk_write_time;
+		dst->wal_records -= src->wal_records;
+		dst->wal_fpi -= src->wal_fpi;
+		dst->wal_bytes -= src->wal_bytes;
+	}
+	else
+	{
+		dst->total_blks_read += src->total_blks_read;
+		dst->total_blks_hit += src->total_blks_hit;
+		dst->total_blks_dirtied += src->total_blks_dirtied;
+		dst->total_blks_written += src->total_blks_written;
+		dst->blks_fetched += src->blks_fetched;
+		dst->blks_hit += src->blks_hit;
+		dst->blk_read_time += src->blk_read_time;
+		dst->blk_write_time += src->blk_write_time;
+		dst->wal_records += src->wal_records;
+		dst->wal_fpi += src->wal_fpi;
+		dst->wal_bytes += src->wal_bytes;
+	}
+}
+
+/*
+ * Report one pass over an index of an append-optimized table to
+ * set_report_vacuum_hook, as lazy_vacuum_one_index() does for the heap, and
+ * remember its resource usage, which the table's report must not count
+ * again.
+ */
+static void
+ao_report_index_extstats(Relation indrel, LVExtStatCounters *counters,
+						 IndexBulkDeleteResult *result,
+						 AOVacuumRelStats *vacrelstats)
+{
+	PgStat_VacuumRelationCounts report;
+
+	memset(&report, 0, sizeof(report));
+	extvac_stats_end(indrel, counters, &report.common);
+	report.type = PGSTAT_EXTVAC_INDEX;
+	report.common.tuples_deleted = (int64) result->tuples_removed;
+	report.index.pages_deleted = result->pages_deleted;
+
+	pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, &report);
+
+	ao_accum_resources(&vacrelstats->extindexes, &report.common, false);
+}
+
+/*
+ * Report the vacuum of an append-optimized table, all of its phases, to
+ * set_report_vacuum_hook.
+ *
+ * The counters that mean something for append-optimized storage are set:
+ * the dead tuples the compaction discarded, and the space the truncation
+ * of segment files and the drop of compacted ones released, in
+ * heap-equivalent pages.  There is no per-tuple freezing, pruning or
+ * visibility map here, so the other table counters stay zero.
+ */
+static void
+ao_report_table_extstats(Relation rel, AOVacuumRelStats *vacrelstats)
+{
+	PgStat_VacuumRelationCounts report;
+
+	memset(&report, 0, sizeof(report));
+	report.type = PGSTAT_EXTVAC_TABLE;
+	report.common = vacrelstats->extphases;
+	ao_accum_resources(&report.common, &vacrelstats->extindexes, true);
+	report.common.tuples_deleted = vacrelstats->num_dead_tuples;
+	report.table.pages_removed =
+		RelationGuessNumberOfBlocksFromSize(vacrelstats->nbytes_truncated);
+
+	pgstat_report_vacuum_ext(rel, -1, -1, 0, 0, false, &report);
 }
 
 /*
@@ -574,22 +766,46 @@ vacuum_appendonly_indexes(Relation aoRelation, int options, Bitmapset *dead_segs
 		{
 			for (i = 0; i < nindexes; i++)
 			{
+				TimestampTz istarttime = GetCurrentTimestamp();
+				double		startdelaytime = VacuumDelayTime;
+				LVExtStatCounters extcounters;
+				IndexBulkDeleteResult result = {0};
+
+				if (set_report_vacuum_hook)
+					extvac_stats_start(Irel[i], &extcounters);
 				scan_index(Irel[i],
 						   aoRelation,
 						   elevel,
-						   bstrategy);
+						   bstrategy,
+						   &result);
+				ao_report_index_vacuum_time(Irel[i], istarttime, startdelaytime);
+				if (set_report_vacuum_hook)
+					ao_report_index_extstats(Irel[i], &extcounters, &result,
+											 vacrelstats);
 			}
 		}
 		else
 		{
 			for (i = 0; i < nindexes; i++)
 			{
+				TimestampTz istarttime = GetCurrentTimestamp();
+				double		startdelaytime = VacuumDelayTime;
+				LVExtStatCounters extcounters;
+				IndexBulkDeleteResult result = {0};
+
+				if (set_report_vacuum_hook)
+					extvac_stats_start(Irel[i], &extcounters);
 				vacuum_appendonly_index(Irel[i],
 										aoRelation,
 										dead_segs,
 										elevel,
 										bstrategy,
-										vacrelstats);
+										vacrelstats,
+										&result);
+				ao_report_index_vacuum_time(Irel[i], istarttime, startdelaytime);
+				if (set_report_vacuum_hook)
+					ao_report_index_extstats(Irel[i], &extcounters, &result,
+											 vacrelstats);
 			}
 		}
 	}
@@ -613,7 +829,8 @@ vacuum_appendonly_index(Relation indexRelation,
 						Bitmapset *dead_segs,
 						int elevel,
 						BufferAccessStrategy bstrategy,
-						AOVacuumRelStats *vacrelstats)
+						AOVacuumRelStats *vacrelstats,
+						IndexBulkDeleteResult *result)
 {
 	IndexBulkDeleteResult *stats;
 	IndexVacuumInfo ivinfo = {0};
@@ -650,6 +867,10 @@ vacuum_appendonly_index(Relation indexRelation,
 
 	if (!stats)
 		return;
+
+	/* Hand the counts of the pass to the caller, for the statistics */
+	if (result)
+		*result = *stats;
 
 	/*
 	 * Now update statistics in pg_class, but only if the index says the count
@@ -790,7 +1011,8 @@ cleanup_vacrelstats(AOVacuumRelStats **vacrelstats)
  * We use this when we have no deletions to do.
  */
 void
-scan_index(Relation indrel, Relation aorel, int elevel, BufferAccessStrategy vac_strategy)
+scan_index(Relation indrel, Relation aorel, int elevel, BufferAccessStrategy vac_strategy,
+		   IndexBulkDeleteResult *result)
 {
 	IndexBulkDeleteResult *stats;
 	IndexVacuumInfo ivinfo = {0};
@@ -817,6 +1039,10 @@ scan_index(Relation indrel, Relation aorel, int elevel, BufferAccessStrategy vac
 
 	if (!stats)
 		return;
+
+	/* Hand the counts of the pass to the caller, for the statistics */
+	if (result)
+		*result = *stats;
 
 	/*
 	 * Now update statistics in pg_class, but only if the index says the count

@@ -86,6 +86,12 @@ SELECT
     max(sdb.checksum_last_failure) as checksum_last_failure,
     sum(sdb.blk_read_time) as blk_read_time,
     sum(sdb.blk_write_time) as blk_write_time,
+    sum(sdb.total_vacuum_time) as total_vacuum_time,
+    sum(sdb.total_autovacuum_time) as total_autovacuum_time,
+    sum(sdb.total_vacuum_delay_time) as total_vacuum_delay_time,
+    sum(sdb.total_autovacuum_delay_time) as total_autovacuum_delay_time,
+    max(sdb.vacuum_failsafe_count) as vacuum_failsafe_count,
+    max(sdb.vacuum_interrupt_count) as vacuum_interrupt_count,
     max(sdb.stats_reset) as stats_reset
 FROM
     gp_stat_database sdb
@@ -120,7 +126,16 @@ SELECT
     s.vacuum_count,
     s.autovacuum_count,
     s.analyze_count,
-    s.autoanalyze_count
+    s.autoanalyze_count,
+    m.total_vacuum_time,
+    m.total_autovacuum_time,
+    m.total_analyze_time,
+    m.total_autoanalyze_time,
+    m.total_vacuum_delay_time,
+    m.total_autovacuum_delay_time,
+    m.vacuum_failsafe_count,
+    m.visible_page_marks_cleared,
+    m.frozen_page_marks_cleared
 FROM
     (SELECT
          allt.relid,
@@ -148,7 +163,16 @@ FROM
          max(vacuum_count) as vacuum_count,
          max(autovacuum_count) as autovacuum_count,
          max(analyze_count) as analyze_count,
-         max(autoanalyze_count) as autoanalyze_count
+         max(autoanalyze_count) as autoanalyze_count,
+         case when d.policytype = 'r' then (sum(total_vacuum_time)/d.numsegments) else sum(total_vacuum_time) end total_vacuum_time,
+         case when d.policytype = 'r' then (sum(total_autovacuum_time)/d.numsegments) else sum(total_autovacuum_time) end total_autovacuum_time,
+         case when d.policytype = 'r' then (sum(total_analyze_time)/d.numsegments) else sum(total_analyze_time) end total_analyze_time,
+         case when d.policytype = 'r' then (sum(total_autoanalyze_time)/d.numsegments) else sum(total_autoanalyze_time) end total_autoanalyze_time,
+         case when d.policytype = 'r' then (sum(total_vacuum_delay_time)/d.numsegments) else sum(total_vacuum_delay_time) end total_vacuum_delay_time,
+         case when d.policytype = 'r' then (sum(total_autovacuum_delay_time)/d.numsegments) else sum(total_autovacuum_delay_time) end total_autovacuum_delay_time,
+         max(vacuum_failsafe_count) as vacuum_failsafe_count,
+         case when d.policytype = 'r' then (sum(visible_page_marks_cleared)/d.numsegments)::bigint else sum(visible_page_marks_cleared) end visible_page_marks_cleared,
+         case when d.policytype = 'r' then (sum(frozen_page_marks_cleared)/d.numsegments)::bigint else sum(frozen_page_marks_cleared) end frozen_page_marks_cleared
      FROM
          gp_dist_random('pg_stat_all_tables') allt
          inner join pg_class c
@@ -229,7 +253,11 @@ SELECT
     m.idx_scan,
     m.last_idx_scan,
     m.idx_tup_read,
-    m.idx_tup_fetch
+    m.idx_tup_fetch,
+    m.total_vacuum_time,
+    m.total_autovacuum_time,
+    m.total_vacuum_delay_time,
+    m.total_autovacuum_delay_time
 FROM
     (SELECT
          alli.relid,
@@ -240,7 +268,11 @@ FROM
          case when d.policytype = 'r' then (sum(alli.idx_scan)/d.numsegments)::bigint else sum(alli.idx_scan) end idx_scan,
          max(last_idx_scan) as last_idx_scan,
          case when d.policytype = 'r' then (sum(alli.idx_tup_read)/d.numsegments)::bigint else sum(alli.idx_tup_read) end idx_tup_read,
-         case when d.policytype = 'r' then (sum(alli.idx_tup_fetch)/d.numsegments)::bigint else sum(alli.idx_tup_fetch) end idx_tup_fetch
+         case when d.policytype = 'r' then (sum(alli.idx_tup_fetch)/d.numsegments)::bigint else sum(alli.idx_tup_fetch) end idx_tup_fetch,
+         case when d.policytype = 'r' then (sum(alli.total_vacuum_time)/d.numsegments) else sum(alli.total_vacuum_time) end total_vacuum_time,
+         case when d.policytype = 'r' then (sum(alli.total_autovacuum_time)/d.numsegments) else sum(alli.total_autovacuum_time) end total_autovacuum_time,
+         case when d.policytype = 'r' then (sum(alli.total_vacuum_delay_time)/d.numsegments) else sum(alli.total_vacuum_delay_time) end total_vacuum_delay_time,
+         case when d.policytype = 'r' then (sum(alli.total_autovacuum_delay_time)/d.numsegments) else sum(alli.total_autovacuum_delay_time) end total_autovacuum_delay_time
      FROM
          gp_dist_random('pg_stat_all_indexes') alli
          inner join pg_class c

@@ -13,6 +13,8 @@
 #ifndef APPENDONLY_COMPACTION_H
 #define APPENDONLY_COMPACTION_H
 
+#include "datatype/timestamp.h"
+#include "pgstat.h"
 #include "nodes/pg_list.h"
 #include "access/appendonly_visimap.h"
 #include "utils/rel.h"
@@ -28,9 +30,22 @@
  */
 typedef struct AOVacuumRelStats
 {
-	int		nbytes_truncated;	/* current # of bytes truncated from segment file */
+	int64	nbytes_truncated;	/* current # of bytes truncated from segment file */
 	int		num_dead_tuples;	/* current # of dead tuples */
 	int		num_index_vacuumed; /* current # of indexes been vacuumed */
+	/* when the first phase started, for the cumulative vacuum time */
+	TimestampTz starttime;
+	/* VacuumDelayTime at that point, for the cumulative delay time */
+	double		startdelaytime;
+	/* the relation these stats were started for */
+	Oid			relid;
+	/*
+	 * Resource usage for set_report_vacuum_hook, accumulated over the phases:
+	 * of the phases as a whole, and of the index passes among them, which are
+	 * reported per index and subtracted from the table's report.
+	 */
+	PgStat_CommonCounts extphases;
+	PgStat_CommonCounts extindexes;
 } AOVacuumRelStats;
 
 extern Bitmapset *AppendOptimizedCollectDeadSegments(Relation aorel);

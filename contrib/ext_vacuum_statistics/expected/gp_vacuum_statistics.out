@@ -1,0 +1,213 @@
+--
+-- The cluster-wide views and functions of ext_vacuum_statistics.
+--
+-- This test runs against a Cloudberry cluster that has ext_vacuum_statistics
+-- in shared_preload_libraries of every instance ("make installcheck-cluster").
+--
+CREATE EXTENSION IF NOT EXISTS ext_vacuum_statistics;
+SELECT ext_vacuum_statistics.gp_vacuum_statistics_reset();
+ gp_vacuum_statistics_reset 
+----------------------------
+ 
+(1 row)
+
+SELECT oid AS dboid FROM pg_database WHERE datname = current_database() \gset
+CREATE TABLE gpvs_dist (id int, v text) WITH (autovacuum_enabled = off)
+  DISTRIBUTED BY (id);
+CREATE INDEX gpvs_dist_idx ON gpvs_dist (id);
+INSERT INTO gpvs_dist SELECT g, 'x' FROM generate_series(1, 10000) g;
+CREATE TABLE gpvs_repl (id int) WITH (autovacuum_enabled = off)
+  DISTRIBUTED REPLICATED;
+INSERT INTO gpvs_repl SELECT generate_series(1, 300);
+DELETE FROM gpvs_dist;
+DELETE FROM gpvs_repl;
+VACUUM gpvs_dist, gpvs_repl;
+-- One row per instance: every segment and the coordinator vacuum the table.
+SELECT count(*) = (SELECT count(*) FROM gp_segment_configuration
+                    WHERE role = 'p') AS one_row_per_instance
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables
+ WHERE relname = 'gpvs_dist';
+ one_row_per_instance 
+----------------------
+ t
+(1 row)
+
+-- The rows were deleted on the segments; the coordinator holds none.
+SELECT gp_segment_id = -1 AS coordinator, sum(tuples_deleted) AS tuples_deleted
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables
+ WHERE relname = 'gpvs_dist'
+ GROUP BY 1 ORDER BY 1;
+ coordinator | tuples_deleted 
+-------------+----------------
+ f           |          10000
+ t           |              0
+(2 rows)
+
+-- The summary adds the segments up; a replicated table is stored on every
+-- segment, so its sums are divided by their number.
+SELECT relname, tuples_deleted
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables_summary
+ WHERE relname LIKE 'gpvs%'
+ ORDER BY relname;
+  relname  | tuples_deleted 
+-----------+----------------
+ gpvs_dist |          10000
+ gpvs_repl |            300
+(2 rows)
+
+SELECT indexrelname, tuples_deleted
+  FROM ext_vacuum_statistics.gp_stats_vacuum_indexes_summary
+ WHERE indexrelname = 'gpvs_dist_idx';
+ indexrelname  | tuples_deleted 
+---------------+----------------
+ gpvs_dist_idx |          10000
+(1 row)
+
+SELECT s.wal_records = (SELECT sum(wal_records)
+                          FROM ext_vacuum_statistics.gp_stats_vacuum_tables
+                         WHERE relname = 'gpvs_dist' AND gp_segment_id >= 0)
+         AS summary_matches_segments
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables_summary s
+ WHERE s.relname = 'gpvs_dist';
+ summary_matches_segments 
+--------------------------
+ t
+(1 row)
+
+SELECT db_wal_records > 0 AS database_has_wal,
+       db_wal_records >= (SELECT sum(wal_records)
+                            FROM ext_vacuum_statistics.gp_stats_vacuum_tables
+                           WHERE relname LIKE 'gpvs%') AS database_covers_tables
+  FROM ext_vacuum_statistics.gp_stats_vacuum_database_summary
+ WHERE dbname = current_database();
+ database_has_wal | database_covers_tables 
+------------------+------------------------
+ t                | t
+(1 row)
+
+-- The same numbers in the core summary views.
+SELECT relname, total_vacuum_time > 0 AS vacuum_timed
+  FROM gp_stat_all_tables_summary
+ WHERE relname LIKE 'gpvs%'
+ ORDER BY relname;
+  relname  | vacuum_timed 
+-----------+--------------
+ gpvs_dist | t
+ gpvs_repl | t
+(2 rows)
+
+-- vacuum_statistics.enabled set on the coordinator reaches the segments.
+INSERT INTO gpvs_dist SELECT g, 'y' FROM generate_series(1, 1000) g;
+DELETE FROM gpvs_dist;
+SET vacuum_statistics.enabled = off;
+VACUUM gpvs_dist;
+RESET vacuum_statistics.enabled;
+SELECT sum(tuples_deleted) AS tuples_deleted
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables
+ WHERE relname = 'gpvs_dist';
+ tuples_deleted 
+----------------
+          10000
+(1 row)
+
+-- Resetting one relation resets it on every instance.
+SELECT ext_vacuum_statistics.gp_extvac_reset_entry(:dboid, 'gpvs_dist'::regclass);
+ gp_extvac_reset_entry 
+-----------------------
+ 
+(1 row)
+
+SELECT coalesce(sum(tuples_deleted), 0) AS tuples_deleted
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables
+ WHERE relname = 'gpvs_dist';
+ tuples_deleted 
+----------------
+              0
+(1 row)
+
+SELECT relname, tuples_deleted
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables_summary
+ WHERE relname LIKE 'gpvs%'
+ ORDER BY relname;
+  relname  | tuples_deleted 
+-----------+----------------
+ gpvs_repl |            300
+(1 row)
+
+-- The entries of a dropped table go away on every instance, when the drop
+-- commits (on the segments through COMMIT PREPARED), and a rolled back drop
+-- keeps them.  The entry is looked up by OID, since the views need the
+-- relation in pg_class.
+SELECT 'gpvs_repl'::regclass::oid AS repl_oid \gset
+CREATE VIEW gpvs_repl_entry AS
+  SELECT s.relid
+    FROM gp_id,
+         LATERAL ext_vacuum_statistics.pg_stats_get_vacuum_tables(:dboid, :repl_oid) s;
+SELECT count(*) AS segment_entries FROM gp_dist_random('gpvs_repl_entry');
+ segment_entries 
+-----------------
+               3
+(1 row)
+
+SELECT count(*) AS coordinator_entries FROM gpvs_repl_entry;
+ coordinator_entries 
+---------------------
+                   1
+(1 row)
+
+BEGIN;
+DROP TABLE gpvs_repl;
+ROLLBACK;
+SELECT count(*) AS segment_entries FROM gp_dist_random('gpvs_repl_entry');
+ segment_entries 
+-----------------
+               3
+(1 row)
+
+DROP TABLE gpvs_repl;
+SELECT count(*) AS segment_entries FROM gp_dist_random('gpvs_repl_entry');
+ segment_entries 
+-----------------
+               0
+(1 row)
+
+SELECT count(*) AS coordinator_entries FROM gpvs_repl_entry;
+ coordinator_entries 
+---------------------
+                   0
+(1 row)
+
+-- The database-level times of the core reach the shared statistics when a
+-- segment flushes its pending statistics, which an idle backend does within
+-- a second (PGSTAT_MIN_INTERVAL); wait for that before reading them.
+SELECT pg_sleep(2);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT total_vacuum_time > 0 AS database_vacuum_timed
+  FROM gp_stat_database_summary
+ WHERE datname = current_database();
+ database_vacuum_timed 
+-----------------------
+ t
+(1 row)
+
+-- Resetting everything on the whole cluster.
+SELECT ext_vacuum_statistics.gp_vacuum_statistics_reset();
+ gp_vacuum_statistics_reset 
+----------------------------
+ 
+(1 row)
+
+SELECT count(*) AS entries
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables
+ WHERE relname LIKE 'gpvs%';
+ entries 
+---------
+       0
+(1 row)
+
+DROP VIEW gpvs_repl_entry;
+DROP TABLE gpvs_dist;
