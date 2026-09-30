@@ -1,0 +1,4 @@
+comment = 'Minimal schema identity demonstration'
+default_version = '1.0'
+relocatable = false
+superuser = true
