@@ -188,6 +188,8 @@ typedef struct LVRelState
 	/* Error reporting state */
 	char	   *dbname;
 	char	   *relnamespace;
+	Oid			reloid;
+	Oid			indoid;
 	char	   *relname;
 	char	   *indname;		/* Current index name */
 	BlockNumber blkno;			/* used only for heap operations */
@@ -228,6 +230,18 @@ typedef struct LVRelState
 	int64		live_tuples;	/* # live tuples remaining */
 	int64		recently_dead_tuples;	/* # dead, but not yet removable */
 	int64		missed_dead_tuples; /* # removable, but not removed */
+
+	/*
+	 * Resource usage of the index passes this process ran, subtracted from
+	 * the heap report to avoid double-counting (see
+	 * accumulate_heap_vacuum_statistics).
+	 */
+	PgStat_CommonCounts *extVacReportIdx;
+
+	/*
+	 * We need to accumulate index statistics for later subtraction from heap
+	 * stats.
+	 */
 } LVRelState;
 
 /*
@@ -315,6 +329,111 @@ static void update_vacuum_error_info(LVRelState *vacrel,
 static void restore_vacuum_error_info(LVRelState *vacrel,
 									  const LVSavedErrInfo *saved_vacrel);
 
+/* Extended vacuum statistics functions */
+
+/*
+ * extvac_stats_start - Allocate and snapshot extended instrumentation.
+ *
+ * Return NULL without allocating anything when there is no consumer. The
+ * caller frees a non-NULL result after reporting the phase, or its vacuum
+ * memory context cleans it up on error.
+ */
+LVExtStatCounters *
+extvac_stats_start(Relation rel)
+{
+	LVExtStatCounters *counters;
+
+	if (set_report_vacuum_hook == NULL)
+		return NULL;
+
+	counters = palloc0(sizeof(LVExtStatCounters));
+	counters->bufusage = pgBufferUsage;
+
+	if (rel->pgstat_info && pgstat_track_counts)
+	{
+		counters->blocks_fetched = rel->pgstat_info->counts.blocks_fetched;
+		counters->blocks_hit = rel->pgstat_info->counts.blocks_hit;
+	}
+	return counters;
+}
+
+/*
+ * extvac_stats_end - Diff resource usage since extvac_stats_start into report.
+ */
+void
+extvac_stats_end(Relation rel, LVExtStatCounters * counters,
+				 PgStat_CommonCounts * report)
+{
+	BufferUsage bufusage;
+
+	memset(&bufusage, 0, sizeof(BufferUsage));
+	BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &counters->bufusage);
+
+	report->total_blks_read = bufusage.local_blks_read + bufusage.shared_blks_read;
+	report->total_blks_hit = bufusage.local_blks_hit + bufusage.shared_blks_hit;
+	report->total_blks_dirtied = bufusage.local_blks_dirtied + bufusage.shared_blks_dirtied;
+	report->total_blks_written = bufusage.shared_blks_written;
+	/* PostgreSQL 16 keeps a single timer for shared and local blocks */
+	report->blk_read_time = INSTR_TIME_GET_MILLISEC(bufusage.blk_read_time);
+	report->blk_write_time = INSTR_TIME_GET_MILLISEC(bufusage.blk_write_time);
+
+	if (rel->pgstat_info && pgstat_track_counts)
+	{
+		report->blks_fetched = rel->pgstat_info->counts.blocks_fetched - counters->blocks_fetched;
+		report->blks_hit = rel->pgstat_info->counts.blocks_hit - counters->blocks_hit;
+	}
+}
+
+/*
+ * Build the heap-specific part of the extended vacuum report from the
+ * counters gathered in vacrel.
+ */
+static void
+accumulate_heap_vacuum_statistics(LVRelState *vacrel, PgStat_VacuumRelationCounts * extVacStats)
+{
+	extVacStats->type = PGSTAT_EXTVAC_TABLE;
+	extVacStats->table.pages_scanned = vacrel->scanned_pages;
+	extVacStats->table.pages_removed = vacrel->removed_pages;
+	extVacStats->table.pages_frozen = vacrel->frozen_pages;
+	extVacStats->table.pages_all_visible = vacrel->all_visible_pages;
+	extVacStats->common.tuples_deleted = vacrel->tuples_deleted;
+	extVacStats->table.tuples_frozen = vacrel->tuples_frozen;
+	extVacStats->table.recently_dead_tuples = vacrel->recently_dead_tuples;
+	extVacStats->table.missed_dead_tuples = vacrel->missed_dead_tuples;
+	extVacStats->table.missed_dead_pages = vacrel->missed_dead_pages;
+	extVacStats->dead_pages = vacrel->dead_pages;
+	extVacStats->table.freeze_age_vacuum_count = vacrel->freeze_age_vacuum ? 1 : 0;
+
+	/*
+	 * Subtract the resource usage of the index passes this process ran: they
+	 * are reported per index, and the database-wide aggregate would count
+	 * them twice otherwise.  Parallel workers report their own usage with
+	 * their index passes, so it never enters the leader's counters.
+	 */
+	extVacStats->common.total_blks_read -= vacrel->extVacReportIdx->total_blks_read;
+	extVacStats->common.total_blks_hit -= vacrel->extVacReportIdx->total_blks_hit;
+	extVacStats->common.total_blks_dirtied -= vacrel->extVacReportIdx->total_blks_dirtied;
+	extVacStats->common.total_blks_written -= vacrel->extVacReportIdx->total_blks_written;
+	extVacStats->common.blk_read_time -= vacrel->extVacReportIdx->blk_read_time;
+	extVacStats->common.blk_write_time -= vacrel->extVacReportIdx->blk_write_time;
+}
+
+/*
+ * Accumulate an index pass report into the running total that is later
+ * subtracted from the heap report.
+ */
+static void
+accumulate_idxs_vacuum_statistics(LVRelState *vacrel,
+								  PgStat_VacuumRelationCounts * extVacIdxStats)
+{
+	vacrel->extVacReportIdx->total_blks_read += extVacIdxStats->common.total_blks_read;
+	vacrel->extVacReportIdx->total_blks_hit += extVacIdxStats->common.total_blks_hit;
+	vacrel->extVacReportIdx->total_blks_dirtied += extVacIdxStats->common.total_blks_dirtied;
+	vacrel->extVacReportIdx->total_blks_written += extVacIdxStats->common.total_blks_written;
+	vacrel->extVacReportIdx->blk_read_time += extVacIdxStats->common.blk_read_time;
+	vacrel->extVacReportIdx->blk_write_time += extVacIdxStats->common.blk_write_time;
+}
+
 /*
  *	lazy_vacuum_rel_heap() -- perform VACUUM for one heap relation
  *
@@ -344,6 +463,7 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	PgStat_Counter startreadtime = 0,
 				startwritetime = 0;
 	double		startdelaytime;
+	LVExtStatCounters *extVacCounters;
 	WalUsage	startwalusage = pgWalUsage;
 	BufferUsage startbufferusage = pgBufferUsage;
 	ErrorContextCallback errcallback;
@@ -366,6 +486,8 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	starttime = GetCurrentTimestamp();
 	startdelaytime = VacuumDelayTime;
 
+	extVacCounters = extvac_stats_start(rel);
+
 	pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM,
 								  RelationGetRelid(rel));
 
@@ -382,9 +504,12 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 * these temp copies.
 	 */
 	vacrel = (LVRelState *) palloc0(sizeof(LVRelState));
+	if (extVacCounters != NULL)
+		vacrel->extVacReportIdx = palloc0(sizeof(PgStat_CommonCounts));
 	vacrel->dbname = get_database_name(MyDatabaseId);
 	vacrel->relnamespace = get_namespace_name(RelationGetNamespace(rel));
 	vacrel->relname = pstrdup(RelationGetRelationName(rel));
+	vacrel->reloid = RelationGetRelid(rel);
 	vacrel->indname = NULL;
 	vacrel->phase = VACUUM_ERRCB_PHASE_UNKNOWN;
 	vacrel->verbose = verbose;
@@ -649,6 +774,16 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 	 * leader's sleeps only; parallel workers account their own sleeps to the
 	 * indexes they process.
 	 */
+	if (extVacCounters != NULL)
+	{
+		PgStat_VacuumRelationCounts *extVacReport = &extVacCounters->report;
+
+		extvac_stats_end(rel, extVacCounters, &extVacReport->common);
+		accumulate_heap_vacuum_statistics(vacrel, extVacReport);
+
+		pfree(extVacCounters);
+		pfree(vacrel->extVacReportIdx);
+	}
 	pgstat_report_vacuum(RelationGetRelid(rel),
 						 rel->rd_rel->relisshared,
 						 Max(vacrel->new_live_tuples, 0),
@@ -2788,10 +2923,11 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 {
 	IndexVacuumInfo ivinfo;
 	LVSavedErrInfo saved_err_info;
-	double		prev_tuples_removed = 0;
-	BlockNumber prev_pages_newly_deleted = 0;
 	TimestampTz istarttime = GetCurrentTimestamp();
 	double		startdelaytime = VacuumDelayTime;
+	double		prev_tuples_removed = 0;
+	BlockNumber prev_pages_newly_deleted = 0;
+	LVExtStatCounters *extVacCounters;
 
 	/*
 	 * Snapshot the running bulkdelete totals: an index may be processed
@@ -2802,6 +2938,7 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 		prev_tuples_removed = istat->tuples_removed;
 		prev_pages_newly_deleted = istat->pages_newly_deleted;
 	}
+	extVacCounters = extvac_stats_start(indrel);
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
 	ivinfo.analyze_only = false;
@@ -2819,6 +2956,7 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	 */
 	Assert(vacrel->indname == NULL);
 	vacrel->indname = pstrdup(RelationGetRelationName(indrel));
+	vacrel->indoid = RelationGetRelid(indrel);
 	update_vacuum_error_info(vacrel, &saved_err_info,
 							 VACUUM_ERRCB_PHASE_VACUUM_INDEX,
 							 InvalidBlockNumber, InvalidOffsetNumber);
@@ -2835,6 +2973,25 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 									(PgStat_Counter) rint(VacuumDelayTime -
 														  startdelaytime),
 									IsAutoVacuumWorkerProcess());
+
+	if (extVacCounters != NULL)
+	{
+		PgStat_VacuumRelationCounts *extVacReport = &extVacCounters->report;
+
+		extvac_stats_end(indrel, extVacCounters, &extVacReport->common);
+		extVacReport->type = PGSTAT_EXTVAC_INDEX;
+		if (istat != NULL)
+		{
+			extVacReport->common.tuples_deleted =
+				istat->tuples_removed - prev_tuples_removed;
+			extVacReport->pages_deleted =
+				(istat->pages_newly_deleted >= prev_pages_newly_deleted) ?
+				istat->pages_newly_deleted - prev_pages_newly_deleted :
+				istat->pages_newly_deleted;
+		}
+		accumulate_idxs_vacuum_statistics(vacrel, extVacReport);
+		pfree(extVacCounters);
+	}
 
 	/* Revert to the previous phase information for error traceback */
 	restore_vacuum_error_info(vacrel, &saved_err_info);
@@ -2860,10 +3017,11 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 {
 	IndexVacuumInfo ivinfo;
 	LVSavedErrInfo saved_err_info;
-	double		prev_tuples_removed = 0;
-	BlockNumber prev_pages_newly_deleted = 0;
 	TimestampTz istarttime = GetCurrentTimestamp();
 	double		startdelaytime = VacuumDelayTime;
+	double		prev_tuples_removed = 0;
+	BlockNumber prev_pages_newly_deleted = 0;
+	LVExtStatCounters *extVacCounters;
 
 	/*
 	 * Snapshot the running bulkdelete totals: an index may be processed
@@ -2874,6 +3032,7 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 		prev_tuples_removed = istat->tuples_removed;
 		prev_pages_newly_deleted = istat->pages_newly_deleted;
 	}
+	extVacCounters = extvac_stats_start(indrel);
 	ivinfo.index = indrel;
 	ivinfo.heaprel = vacrel->rel;
 	ivinfo.analyze_only = false;
@@ -2892,6 +3051,7 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 	 */
 	Assert(vacrel->indname == NULL);
 	vacrel->indname = pstrdup(RelationGetRelationName(indrel));
+	vacrel->indoid = RelationGetRelid(indrel);
 	update_vacuum_error_info(vacrel, &saved_err_info,
 							 VACUUM_ERRCB_PHASE_INDEX_CLEANUP,
 							 InvalidBlockNumber, InvalidOffsetNumber);
@@ -2907,6 +3067,27 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 									(PgStat_Counter) rint(VacuumDelayTime -
 														  startdelaytime),
 									IsAutoVacuumWorkerProcess());
+
+	if (extVacCounters != NULL)
+	{
+		PgStat_VacuumRelationCounts *extVacReport = &extVacCounters->report;
+
+		extvac_stats_end(indrel, extVacCounters, &extVacReport->common);
+		extVacReport->type = PGSTAT_EXTVAC_INDEX;
+		if (istat != NULL)
+		{
+			extVacReport->common.tuples_deleted =
+				istat->tuples_removed - prev_tuples_removed;
+			extVacReport->pages_deleted =
+				(istat->pages_newly_deleted >= prev_pages_newly_deleted) ?
+				istat->pages_newly_deleted - prev_pages_newly_deleted :
+				istat->pages_newly_deleted;
+			if (istat->pages_deleted > istat->pages_free)
+				extVacReport->dead_pages = istat->pages_deleted - istat->pages_free;
+		}
+		accumulate_idxs_vacuum_statistics(vacrel, extVacReport);
+		pfree(extVacCounters);
+	}
 
 	/* Revert to the previous phase information for error traceback */
 	restore_vacuum_error_info(vacrel, &saved_err_info);
