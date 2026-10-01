@@ -1,6 +1,6 @@
 --
 -- Cluster-wide vacuum statistics: aggregation, collection control, reset,
--- and preservation of entries.  The final two cases cover core summary views
+-- and cleanup after DROP.  The final two cases cover core summary views
 -- and synchronization of track_cost_delay_timing.
 --
 -- This test runs against a Cloudberry cluster that has ext_vacuum_statistics
@@ -94,6 +94,27 @@ SELECT relname, tuples_deleted
  WHERE relname LIKE 'gpvs%'
  ORDER BY relname;
 
+-- DROP cleanup: save the OID and read the statistics directly.  The public
+-- views join pg_class, so they would hide an orphaned entry after DROP.
+-- gp_id makes this helper view executable on each segment via gp_dist_random.
+-- Expect 3 segment entries and 1 coordinator entry in the regression cluster.
+SELECT 'gpvs_repl'::regclass::oid AS repl_oid \gset
+CREATE VIEW gpvs_repl_entry AS
+  SELECT s.relid
+    FROM gp_id,
+         LATERAL ext_vacuum_statistics.pg_stats_get_vacuum_tables(:dboid, :repl_oid) s;
+SELECT count(*) AS segment_entries FROM gp_dist_random('gpvs_repl_entry');
+SELECT count(*) AS coordinator_entries FROM gpvs_repl_entry;
+-- Rolling back DROP must preserve the 3 segment entries.
+BEGIN;
+DROP TABLE gpvs_repl;
+ROLLBACK;
+SELECT count(*) AS segment_entries FROM gp_dist_random('gpvs_repl_entry');
+-- Committing DROP must remove entries from both segments and coordinator.
+DROP TABLE gpvs_repl;
+SELECT count(*) AS segment_entries FROM gp_dist_random('gpvs_repl_entry');
+SELECT count(*) AS coordinator_entries FROM gpvs_repl_entry;
+
 -- Core database timing is published asynchronously.  Allow pending stats
 -- to be flushed before checking that the vacuum duration is positive.
 SELECT pg_sleep(2);
@@ -109,7 +130,7 @@ SELECT count(*) = (SELECT count(*) FROM gp_segment_configuration WHERE role = 'p
   FROM ext_vacuum_statistics.gp_stats_vacuum_tables
  WHERE relname = 'gpvs_dist';
 
-DROP TABLE gpvs_repl;
+DROP VIEW gpvs_repl_entry;
 DROP TABLE gpvs_dist;
 
 -- Core GUC regression: reconnect with timing enabled at session startup.

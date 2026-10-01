@@ -67,4 +67,14 @@ SELECT relname, tuples_deleted
   FROM ext_vacuum_statistics.gp_stats_vacuum_tables_summary
  WHERE relname = 'gpvs_ao_row';
 
+-- The entries go away with the tables, on every instance.
+SELECT 'gpvs_ao_row'::regclass::oid AS row_oid \gset
+SELECT oid AS dboid FROM pg_database WHERE datname = current_database() \gset
+CREATE VIEW gpvs_ao_entry AS
+  SELECT s.relid
+    FROM gp_id,
+         LATERAL ext_vacuum_statistics.pg_stats_get_vacuum_tables(:dboid, :row_oid) s;
+SELECT count(*) AS segment_entries FROM gp_dist_random('gpvs_ao_entry');
 DROP TABLE gpvs_ao_row, gpvs_ao_col;
+SELECT count(*) AS segment_entries FROM gp_dist_random('gpvs_ao_entry');
+DROP VIEW gpvs_ao_entry;
