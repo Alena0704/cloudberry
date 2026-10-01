@@ -98,3 +98,35 @@ of the last one.  The compaction moves live tuples to another segment file,
 so an index's `tuples_deleted` counts the entries of the moved live tuples
 too.
 
+## Cloudberry
+
+Each instance (the coordinator and every segment) keeps the statistics of the
+vacuums it runs itself; the views show the statistics of the instance they are
+queried on.  Load the module on all instances, mirrors and the standby
+coordinator included, and restart the cluster:
+
+```
+gpconfig -c shared_preload_libraries -v '<existing libraries>,ext_vacuum_statistics'
+gpstop -ar
+```
+
+Cluster-wide views, like the `gp_stat_*` views of the core:
+
+| View | Description |
+|------|-------------|
+| `ext_vacuum_statistics.gp_stats_vacuum_tables` | `pg_stats_vacuum_tables` of every instance, with `gp_segment_id` (-1 for the coordinator) |
+| `ext_vacuum_statistics.gp_stats_vacuum_indexes` | the same for indexes |
+| `ext_vacuum_statistics.gp_stats_vacuum_database` | the same for databases |
+| `ext_vacuum_statistics.gp_stats_vacuum_tables_summary` | one row per table: summed over the segments (divided by their number for replicated tables); catalogs as on the coordinator |
+| `ext_vacuum_statistics.gp_stats_vacuum_indexes_summary` | the same for indexes |
+| `ext_vacuum_statistics.gp_stats_vacuum_database_summary` | one row per database, summed over all instances |
+
+The statistics are not replicated: after a failover the promoted mirror starts
+with empty statistics, as with the built-in cumulative statistics.
+
+The test of the cluster-wide views runs against such a cluster:
+
+```
+make -C contrib/ext_vacuum_statistics installcheck-cluster
+```
+

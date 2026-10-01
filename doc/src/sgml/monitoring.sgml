@@ -4712,6 +4712,13 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
    on the current instance. The current database's counters are reset
    together with its other statistics by <function>pg_stat_reset()</function>.
   </para>
+  <para>
+   In Cloudberry, <structname>gp_stat_vacuum</structname> shows these columns
+   for every instance, with <structfield>gp_segment_id</structfield> identifying
+   the instance. <structname>gp_stat_vacuum_summary</structname> sums the times
+   across instances and takes the maximum failsafe and interrupt counts and
+   the latest reset time for each database.
+  </para>
   <table id="pg-stat-vacuum-view" xreflabel="pg_stat_vacuum">
    <title><structname>pg_stat_vacuum</structname> View</title>
    <tgroup cols="1">

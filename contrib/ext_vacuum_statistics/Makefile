@@ -23,3 +23,9 @@ include $(top_builddir)/src/Makefile.global
 include $(top_srcdir)/contrib/contrib-global.mk
 endif
 
+# Cloudberry: the test of the cluster-wide views needs a running cluster
+# with the module in shared_preload_libraries of every instance, which the
+# temporary instances of "make check" are not, so it has a target of its
+# own, run against such a cluster.
+installcheck-cluster:
+	$(pg_regress_installcheck) --dbname=contrib_regression_vacstat gp_vacuum_statistics gp_vacuum_statistics_ao
