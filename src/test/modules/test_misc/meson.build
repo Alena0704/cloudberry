@@ -13,6 +13,7 @@ tests += {
       't/016_index_vacuum_time.pl',
       't/017_vacuum_failsafe.pl',
       't/018_vacuum_interrupts.pl',
+      't/019_resqueue_stats_restart.pl',
     ],
   },
 }
