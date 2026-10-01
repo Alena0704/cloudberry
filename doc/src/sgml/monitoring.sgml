@@ -4789,6 +4789,15 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
       </para></entry>
      </row>
 
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>vacuum_failsafe_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of vacuums in this database that entered the wraparound
+       failsafe mode (see <xref linkend="guc-vacuum-failsafe-age"/>)
+      </para></entry>
+     </row>
 
 
      <row>
@@ -5077,6 +5086,15 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
       </para></entry>
      </row>
 
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>vacuum_failsafe_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of vacuums of this table that entered the wraparound failsafe
+       mode (see <xref linkend="guc-vacuum-failsafe-age"/>)
+      </para></entry>
+     </row>
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">

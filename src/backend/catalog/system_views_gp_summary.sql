@@ -126,7 +126,8 @@ SELECT
     m.total_analyze_time,
     m.total_autoanalyze_time,
     m.total_vacuum_delay_time,
-    m.total_autovacuum_delay_time
+    m.total_autovacuum_delay_time,
+    m.vacuum_failsafe_count
 FROM
     (SELECT
          allt.relid,
@@ -160,7 +161,8 @@ FROM
          case when d.policytype = 'r' then (sum(total_analyze_time)/d.numsegments) else sum(total_analyze_time) end total_analyze_time,
          case when d.policytype = 'r' then (sum(total_autoanalyze_time)/d.numsegments) else sum(total_autoanalyze_time) end total_autoanalyze_time,
          case when d.policytype = 'r' then (sum(total_vacuum_delay_time)/d.numsegments) else sum(total_vacuum_delay_time) end total_vacuum_delay_time,
-         case when d.policytype = 'r' then (sum(total_autovacuum_delay_time)/d.numsegments) else sum(total_autovacuum_delay_time) end total_autovacuum_delay_time
+         case when d.policytype = 'r' then (sum(total_autovacuum_delay_time)/d.numsegments) else sum(total_autovacuum_delay_time) end total_autovacuum_delay_time,
+         max(vacuum_failsafe_count) as vacuum_failsafe_count
      FROM
          gp_dist_random('pg_stat_all_tables') allt
          inner join pg_class c

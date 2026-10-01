@@ -707,7 +707,8 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_total_analyze_time(C.oid) AS total_analyze_time,
             pg_stat_get_total_autoanalyze_time(C.oid) AS total_autoanalyze_time,
             pg_stat_get_total_vacuum_delay_time(C.oid) AS total_vacuum_delay_time,
-            pg_stat_get_total_autovacuum_delay_time(C.oid) AS total_autovacuum_delay_time
+            pg_stat_get_total_autovacuum_delay_time(C.oid) AS total_autovacuum_delay_time,
+            pg_stat_get_vacuum_failsafe_count(C.oid) AS vacuum_failsafe_count
     FROM pg_class C LEFT JOIN
          pg_index I ON C.oid = I.indrelid
          LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
@@ -1224,6 +1225,7 @@ CREATE VIEW pg_stat_vacuum AS
             pg_stat_get_db_total_autovacuum_time(D.oid) AS total_autovacuum_time,
             pg_stat_get_db_total_vacuum_delay_time(D.oid) AS total_vacuum_delay_time,
             pg_stat_get_db_total_autovacuum_delay_time(D.oid) AS total_autovacuum_delay_time,
+            pg_stat_get_db_vacuum_failsafe_count(D.oid) AS vacuum_failsafe_count,
             pg_stat_get_db_stat_reset_time(D.oid) AS stats_reset
     FROM (
         SELECT 0 AS oid, NULL::name AS datname
