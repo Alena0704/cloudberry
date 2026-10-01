@@ -127,7 +127,9 @@ SELECT
     m.total_autoanalyze_time,
     m.total_vacuum_delay_time,
     m.total_autovacuum_delay_time,
-    m.vacuum_failsafe_count
+    m.vacuum_failsafe_count,
+    m.visible_page_marks_cleared,
+    m.frozen_page_marks_cleared
 FROM
     (SELECT
          allt.relid,
@@ -162,7 +164,9 @@ FROM
          case when d.policytype = 'r' then (sum(total_autoanalyze_time)/d.numsegments) else sum(total_autoanalyze_time) end total_autoanalyze_time,
          case when d.policytype = 'r' then (sum(total_vacuum_delay_time)/d.numsegments) else sum(total_vacuum_delay_time) end total_vacuum_delay_time,
          case when d.policytype = 'r' then (sum(total_autovacuum_delay_time)/d.numsegments) else sum(total_autovacuum_delay_time) end total_autovacuum_delay_time,
-         max(vacuum_failsafe_count) as vacuum_failsafe_count
+         max(vacuum_failsafe_count) as vacuum_failsafe_count,
+         case when d.policytype = 'r' then (sum(visible_page_marks_cleared)/d.numsegments)::bigint else sum(visible_page_marks_cleared) end visible_page_marks_cleared,
+         case when d.policytype = 'r' then (sum(frozen_page_marks_cleared)/d.numsegments)::bigint else sum(frozen_page_marks_cleared) end frozen_page_marks_cleared
      FROM
          gp_dist_random('pg_stat_all_tables') allt
          inner join pg_class c
