@@ -4799,6 +4799,14 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
       </para></entry>
      </row>
 
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>vacuum_interrupt_count</structfield> <type>bigint</type>
+      </para>
+      <para>
+       Number of times a vacuum in this database was interrupted by an error
+      </para></entry>
+     </row>
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">

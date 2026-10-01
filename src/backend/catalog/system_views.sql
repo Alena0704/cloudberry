@@ -1226,6 +1226,7 @@ CREATE VIEW pg_stat_vacuum AS
             pg_stat_get_db_total_vacuum_delay_time(D.oid) AS total_vacuum_delay_time,
             pg_stat_get_db_total_autovacuum_delay_time(D.oid) AS total_autovacuum_delay_time,
             pg_stat_get_db_vacuum_failsafe_count(D.oid) AS vacuum_failsafe_count,
+            pg_stat_get_db_vacuum_interrupt_count(D.oid) AS vacuum_interrupt_count,
             pg_stat_get_db_stat_reset_time(D.oid) AS stats_reset
     FROM (
         SELECT 0 AS oid, NULL::name AS datname
