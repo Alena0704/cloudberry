@@ -124,7 +124,9 @@ SELECT
     m.total_vacuum_time,
     m.total_autovacuum_time,
     m.total_analyze_time,
-    m.total_autoanalyze_time
+    m.total_autoanalyze_time,
+    m.total_vacuum_delay_time,
+    m.total_autovacuum_delay_time
 FROM
     (SELECT
          allt.relid,
@@ -156,7 +158,9 @@ FROM
          case when d.policytype = 'r' then (sum(total_vacuum_time)/d.numsegments) else sum(total_vacuum_time) end total_vacuum_time,
          case when d.policytype = 'r' then (sum(total_autovacuum_time)/d.numsegments) else sum(total_autovacuum_time) end total_autovacuum_time,
          case when d.policytype = 'r' then (sum(total_analyze_time)/d.numsegments) else sum(total_analyze_time) end total_analyze_time,
-         case when d.policytype = 'r' then (sum(total_autoanalyze_time)/d.numsegments) else sum(total_autoanalyze_time) end total_autoanalyze_time
+         case when d.policytype = 'r' then (sum(total_autoanalyze_time)/d.numsegments) else sum(total_autoanalyze_time) end total_autoanalyze_time,
+         case when d.policytype = 'r' then (sum(total_vacuum_delay_time)/d.numsegments) else sum(total_vacuum_delay_time) end total_vacuum_delay_time,
+         case when d.policytype = 'r' then (sum(total_autovacuum_delay_time)/d.numsegments) else sum(total_autovacuum_delay_time) end total_autovacuum_delay_time
      FROM
          gp_dist_random('pg_stat_all_tables') allt
          inner join pg_class c
@@ -237,7 +241,11 @@ SELECT
     m.idx_scan,
     m.last_idx_scan,
     m.idx_tup_read,
-    m.idx_tup_fetch
+    m.idx_tup_fetch,
+    m.total_vacuum_time,
+    m.total_autovacuum_time,
+    m.total_vacuum_delay_time,
+    m.total_autovacuum_delay_time
 FROM
     (SELECT
          alli.relid,
@@ -248,7 +256,11 @@ FROM
          case when d.policytype = 'r' then (sum(alli.idx_scan)/d.numsegments)::bigint else sum(alli.idx_scan) end idx_scan,
          max(last_idx_scan) as last_idx_scan,
          case when d.policytype = 'r' then (sum(alli.idx_tup_read)/d.numsegments)::bigint else sum(alli.idx_tup_read) end idx_tup_read,
-         case when d.policytype = 'r' then (sum(alli.idx_tup_fetch)/d.numsegments)::bigint else sum(alli.idx_tup_fetch) end idx_tup_fetch
+         case when d.policytype = 'r' then (sum(alli.idx_tup_fetch)/d.numsegments)::bigint else sum(alli.idx_tup_fetch) end idx_tup_fetch,
+         case when d.policytype = 'r' then (sum(alli.total_vacuum_time)/d.numsegments) else sum(alli.total_vacuum_time) end total_vacuum_time,
+         case when d.policytype = 'r' then (sum(alli.total_autovacuum_time)/d.numsegments) else sum(alli.total_autovacuum_time) end total_autovacuum_time,
+         case when d.policytype = 'r' then (sum(alli.total_vacuum_delay_time)/d.numsegments) else sum(alli.total_vacuum_delay_time) end total_vacuum_delay_time,
+         case when d.policytype = 'r' then (sum(alli.total_autovacuum_delay_time)/d.numsegments) else sum(alli.total_autovacuum_delay_time) end total_autovacuum_delay_time
      FROM
          gp_dist_random('pg_stat_all_indexes') alli
          inner join pg_class c

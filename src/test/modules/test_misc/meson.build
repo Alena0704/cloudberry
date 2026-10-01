@@ -10,6 +10,7 @@ tests += {
       't/002_tablespace.pl',
       't/003_check_guc.pl',
       't/004_io_direct.pl',
+      't/016_index_vacuum_time.pl',
     ],
   },
 }

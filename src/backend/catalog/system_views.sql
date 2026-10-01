@@ -705,7 +705,9 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_total_vacuum_time(C.oid) AS total_vacuum_time,
             pg_stat_get_total_autovacuum_time(C.oid) AS total_autovacuum_time,
             pg_stat_get_total_analyze_time(C.oid) AS total_analyze_time,
-            pg_stat_get_total_autoanalyze_time(C.oid) AS total_autoanalyze_time
+            pg_stat_get_total_autoanalyze_time(C.oid) AS total_autoanalyze_time,
+            pg_stat_get_total_vacuum_delay_time(C.oid) AS total_vacuum_delay_time,
+            pg_stat_get_total_autovacuum_delay_time(C.oid) AS total_autovacuum_delay_time
     FROM pg_class C LEFT JOIN
          pg_index I ON C.oid = I.indrelid
          LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
@@ -825,7 +827,11 @@ CREATE VIEW pg_stat_all_indexes AS
             pg_stat_get_numscans(I.oid) AS idx_scan,
             pg_stat_get_lastscan(I.oid) AS last_idx_scan,
             pg_stat_get_tuples_returned(I.oid) AS idx_tup_read,
-            pg_stat_get_tuples_fetched(I.oid) AS idx_tup_fetch
+            pg_stat_get_tuples_fetched(I.oid) AS idx_tup_fetch,
+            pg_stat_get_total_vacuum_time(I.oid) AS total_vacuum_time,
+            pg_stat_get_total_autovacuum_time(I.oid) AS total_autovacuum_time,
+            pg_stat_get_total_vacuum_delay_time(I.oid) AS total_vacuum_delay_time,
+            pg_stat_get_total_autovacuum_delay_time(I.oid) AS total_autovacuum_delay_time
     FROM pg_class C JOIN
             pg_index X ON C.oid = X.indrelid JOIN
             pg_class I ON I.oid = X.indexrelid
@@ -1209,6 +1215,22 @@ CREATE VIEW pg_stat_database AS
         UNION ALL
         SELECT oid, datname FROM pg_database
     ) D;
+
+CREATE VIEW pg_stat_vacuum AS
+    SELECT
+            D.oid AS datid,
+            D.datname AS datname,
+            pg_stat_get_db_total_vacuum_time(D.oid) AS total_vacuum_time,
+            pg_stat_get_db_total_autovacuum_time(D.oid) AS total_autovacuum_time,
+            pg_stat_get_db_total_vacuum_delay_time(D.oid) AS total_vacuum_delay_time,
+            pg_stat_get_db_total_autovacuum_delay_time(D.oid) AS total_autovacuum_delay_time,
+            pg_stat_get_db_stat_reset_time(D.oid) AS stats_reset
+    FROM (
+        SELECT 0 AS oid, NULL::name AS datname
+        UNION ALL
+        SELECT oid, datname FROM pg_database
+    ) D;
+
 CREATE VIEW pg_resqueue_status AS
     SELECT
             q.rsqname,

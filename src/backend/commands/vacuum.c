@@ -122,6 +122,12 @@ int			vacuum_cost_limit = 200;
 int64		parallel_vacuum_worker_delay_ns = 0;
 
 /*
+ * Cumulative cost-based vacuum delay time (ms) for this process.
+ * Callers save the starting value and report the delta.
+ */
+double		VacuumDelayTime = 0;
+
+/*
  * VacuumFailsafeActive is a defined as a global so that we can determine
  * whether or not to re-enable cost-based vacuum delay when vacuuming a table.
  * If failsafe mode has been engaged, we will not re-enable cost-based delay
@@ -3247,6 +3253,7 @@ vacuum_delay_point(bool is_analyze)
 			INSTR_TIME_SET_CURRENT(delay_end);
 			INSTR_TIME_SET_ZERO(delay);
 			INSTR_TIME_ACCUM_DIFF(delay, delay_end, delay_start);
+			VacuumDelayTime += INSTR_TIME_GET_MILLISEC(delay);
 
 			/*
 			 * For parallel workers, we only report the delay time every once
