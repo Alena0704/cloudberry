@@ -55,5 +55,29 @@ SELECT count(*) FROM ext_vacuum_statistics.pg_stats_vacuum_tables
                  WHERE oid = 'vacuum_toast'::regclass)}), '1',
    'table statistics view includes TOAST relations');
 
+# AO data is read outside the buffer manager. Index buffer accesses must not
+# be subtracted from the table's own relation-local counters.
+for my $orientation ('row', 'column')
+{
+    my $table = "vacuum_ao_$orientation";
+    $node->safe_psql('postgres', qq{
+CREATE TABLE $table (id int) WITH (appendonly = true, orientation = $orientation);
+CREATE INDEX ${table}_idx ON $table (id);
+INSERT INTO $table SELECT generate_series(1, $nrows);
+DELETE FROM $table WHERE id % 2 = 0;
+});
+    $node->safe_psql('postgres', "VACUUM $table");
+    is($node->safe_psql('postgres', qq{
+SELECT rel_blks_read >= 0 AND rel_blks_hit >= 0
+  FROM ext_vacuum_statistics.pg_stats_vacuum_tables
+ WHERE relname = '$table'}), 't',
+       "$orientation AO table has nonnegative relation-local block counts");
+    is($node->safe_psql('postgres', qq{
+SELECT rel_blks_hit > 0
+  FROM ext_vacuum_statistics.pg_stats_vacuum_indexes
+ WHERE indexrelname = '${table}_idx'}), 't',
+       "$orientation AO vacuum accessed index buffers");
+}
+
 $node->stop;
 done_testing();
