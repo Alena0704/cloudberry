@@ -34,6 +34,10 @@ typedef struct AOVacuumRelStats
 	int		num_index_vacuumed; /* current # of indexes been vacuumed */
 	/* when the first phase started, for the cumulative vacuum time */
 	TimestampTz starttime;
+	/* VacuumDelayTime at that point, for the cumulative delay time */
+	double		startdelaytime;
+	/* the relation these stats were started for */
+	Oid			relid;
 } AOVacuumRelStats;
 
 extern Bitmapset *AppendOptimizedCollectDeadSegments(Relation aorel);
