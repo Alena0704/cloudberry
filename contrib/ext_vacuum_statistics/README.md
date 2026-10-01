@@ -50,6 +50,12 @@ Example output:
  mytable   |             120 |            340 |          15 |            500 |            10
 ```
 
+Reset statistics when needed:
+
+```sql
+SELECT ext_vacuum_statistics.vacuum_statistics_reset();
+```
+
 ## Configuration (GUCs)
 
 | GUC | Default | Description |
@@ -121,6 +127,11 @@ Cluster-wide views, like the `gp_stat_*` views of the core:
 | `ext_vacuum_statistics.gp_stats_vacuum_indexes_summary` | the same for indexes |
 | `ext_vacuum_statistics.gp_stats_vacuum_database_summary` | one row per database, summed over all instances |
 
+The reset functions act on the instance they are called on;
+`gp_vacuum_statistics_reset()`, `gp_extvac_reset_entry(dboid, relid)` and
+`gp_extvac_reset_db_entry(dboid)` run them on the whole cluster.  A `SET` of
+`vacuum_statistics.enabled` on the coordinator is passed on to the segments.
+
 The statistics are not replicated: after a failover the promoted mirror starts
 with empty statistics, as with the built-in cumulative statistics.
 
@@ -130,3 +141,13 @@ The test of the cluster-wide views runs against such a cluster:
 make -C contrib/ext_vacuum_statistics installcheck-cluster
 ```
 
+Reset functions return `void` and require superuser privileges by default.
+An administrator can delegate access with `GRANT EXECUTE`; cluster wrappers
+also require permission to execute the corresponding local reset function.
+A relation reset clears only that relation's counters, leaving its indexes and
+the database aggregate unchanged. A database reset clears its aggregate and
+all its relation entries. The global reset affects all databases on the current
+instance; the `gp_` wrappers apply these operations on every instance.
+Existing rows remain visible with zero counters until another vacuum updates
+them. `pg_stat_reset()` also resets the extension's entries for the current
+database. Resetting does not remove the type of a table, index, or database entry.

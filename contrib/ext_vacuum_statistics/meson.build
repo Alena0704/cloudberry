@@ -34,7 +34,10 @@ tests += {
   },
   'tap': {
     'tests': [
+      't/052_vacuum_extending_basic_test.pl',
+      't/054_vacuum_extending_gucs_test.pl',
       't/058_vacuum_stats_counters.pl',
+      't/060_vacuum_stats_reset.pl',
     ],
   },
 }

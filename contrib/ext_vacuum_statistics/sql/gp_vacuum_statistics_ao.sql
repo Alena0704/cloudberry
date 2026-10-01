@@ -6,6 +6,8 @@
 -- in shared_preload_libraries of every instance ("make installcheck-cluster").
 --
 CREATE EXTENSION IF NOT EXISTS ext_vacuum_statistics;
+SELECT ext_vacuum_statistics.gp_vacuum_statistics_reset();
+
 CREATE TABLE gpvs_ao_row (id int, v text) WITH (appendonly = true)
   DISTRIBUTED BY (id);
 CREATE TABLE gpvs_ao_col (id int, v text)

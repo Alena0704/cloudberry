@@ -41,7 +41,8 @@
   When active, the module provides views
   <structname>ext_vacuum_statistics.pg_stats_vacuum_tables</structname>,
   <structname>ext_vacuum_statistics.pg_stats_vacuum_indexes</structname>, and
-  <structname>ext_vacuum_statistics.pg_stats_vacuum_database</structname>.
+  <structname>ext_vacuum_statistics.pg_stats_vacuum_database</structname>,
+  plus functions to reset statistics and manage tracking.
  </para>
 
  <para>
@@ -566,6 +567,60 @@
   </table>
  </sect2>
 
+ <sect2 id="extvacuumstatistics-functions">
+  <title>Functions</title>
+
+  <para>
+   Reset functions require superuser privileges by default. Access can be
+   delegated with <command>GRANT EXECUTE</command>. Existing entries remain
+   visible with zero counters after a reset; their table, index, or database
+   type is preserved. Missing entries are not created by a reset.
+   <function>pg_stat_reset()</function> also resets the module's counters for
+   the current database.
+  </para>
+
+  <variablelist>
+   <varlistentry>
+    <term>
+     <function>ext_vacuum_statistics.vacuum_statistics_reset()</function>
+     <returnvalue>void</returnvalue>
+    </term>
+    <listitem>
+     <para>
+      Resets all vacuum statistics of the module, those of relations and of
+      databases.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>ext_vacuum_statistics.extvac_reset_entry(<parameter>dboid</parameter> <type>oid</type>, <parameter>relid</parameter> <type>oid</type>)</function>
+     <returnvalue>void</returnvalue>
+    </term>
+    <listitem>
+     <para>
+      Resets the vacuum statistics of one table or index.  Use
+      <literal>0</literal> as <parameter>dboid</parameter> for a shared
+      catalog. The database aggregate and other relations are unchanged.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>ext_vacuum_statistics.extvac_reset_db_entry(<parameter>dboid</parameter> <type>oid</type>)</function>
+     <returnvalue>void</returnvalue>
+    </term>
+    <listitem>
+     <para>
+      Resets the vacuum statistics of a database: its aggregate and the
+      statistics of all its tables and indexes.
+     </para>
+    </listitem>
+   </varlistentry>
+  </variablelist>
+ </sect2>
 
  <sect2 id="extvacuumstatistics-append-optimized">
   <title>Append-Optimized Tables</title>
@@ -672,6 +727,14 @@
    twice.
   </para>
 
+  <para>
+   The reset functions act on the instance they are called on.
+   <function>ext_vacuum_statistics.gp_vacuum_statistics_reset()</function>,
+   <function>ext_vacuum_statistics.gp_extvac_reset_entry(<parameter>dboid</parameter>, <parameter>relid</parameter>)</function>
+   and
+   <function>ext_vacuum_statistics.gp_extvac_reset_db_entry(<parameter>dboid</parameter>)</function>
+   call them on the coordinator and on every segment.
+  </para>
 
   <para>
    The module has to be loaded on every instance, mirrors and the standby

@@ -1,12 +1,14 @@
 --
--- Cluster-wide vacuum statistics: aggregation and collection control.
--- The final two cases cover core summary views and synchronization of
--- track_cost_delay_timing.
+-- Cluster-wide vacuum statistics: aggregation, collection control, reset,
+-- and preservation of entries.  The final two cases cover core summary views
+-- and synchronization of track_cost_delay_timing.
 --
 -- This test runs against a Cloudberry cluster that has ext_vacuum_statistics
 -- in shared_preload_libraries of every instance ("make installcheck-cluster").
 --
 CREATE EXTENSION IF NOT EXISTS ext_vacuum_statistics;
+SELECT ext_vacuum_statistics.gp_vacuum_statistics_reset();
+
 SELECT oid AS dboid FROM pg_database WHERE datname = current_database() \gset
 
 -- Prepare dead tuples: 10000 in a distributed table and 300 copies on
@@ -81,12 +83,31 @@ SELECT sum(tuples_deleted) AS tuples_deleted
   FROM ext_vacuum_statistics.gp_stats_vacuum_tables
  WHERE relname = 'gpvs_dist';
 
+-- Relation reset: gpvs_dist must become 0 across the cluster, while
+-- gpvs_repl must retain its summary count of 300.
+SELECT ext_vacuum_statistics.gp_extvac_reset_entry(:dboid, 'gpvs_dist'::regclass);
+SELECT coalesce(sum(tuples_deleted), 0) AS tuples_deleted
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables
+ WHERE relname = 'gpvs_dist';
+SELECT relname, tuples_deleted
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables_summary
+ WHERE relname LIKE 'gpvs%'
+ ORDER BY relname;
+
 -- Core database timing is published asynchronously.  Allow pending stats
 -- to be flushed before checking that the vacuum duration is positive.
 SELECT pg_sleep(2);
 SELECT total_vacuum_time > 0 AS database_vacuum_timed
   FROM gp_stat_vacuum_summary
  WHERE datname = current_database();
+
+-- Cluster reset must preserve the remaining table's entries and zero
+-- its tuple, page, and WAL counters on every instance.
+SELECT ext_vacuum_statistics.gp_vacuum_statistics_reset();
+SELECT count(*) = (SELECT count(*) FROM gp_segment_configuration WHERE role = 'p') AS rows_preserved,
+       bool_and(tuples_deleted = 0 AND pages_scanned = 0 AND wal_records = 0) AS counters_reset
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables
+ WHERE relname = 'gpvs_dist';
 
 DROP TABLE gpvs_repl;
 DROP TABLE gpvs_dist;

@@ -7,6 +7,12 @@
 --
 CREATE EXTENSION IF NOT EXISTS ext_vacuum_statistics;
 NOTICE:  extension "ext_vacuum_statistics" already exists, skipping
+SELECT ext_vacuum_statistics.gp_vacuum_statistics_reset();
+ gp_vacuum_statistics_reset 
+----------------------------
+ 
+(1 row)
+
 CREATE TABLE gpvs_ao_row (id int, v text) WITH (appendonly = true)
   DISTRIBUTED BY (id);
 CREATE TABLE gpvs_ao_col (id int, v text)

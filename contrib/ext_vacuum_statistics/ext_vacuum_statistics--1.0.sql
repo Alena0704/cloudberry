@@ -16,6 +16,30 @@ CREATE SCHEMA IF NOT EXISTS ext_vacuum_statistics;
 COMMENT ON SCHEMA ext_vacuum_statistics IS
   'Extended vacuum statistics (heap, index, database)';
 
+-- Reset functions
+CREATE OR REPLACE FUNCTION ext_vacuum_statistics.extvac_reset_entry(
+    dboid oid,
+    relid oid
+)
+RETURNS void
+AS 'MODULE_PATHNAME', 'extvac_reset_entry'
+LANGUAGE C STRICT VOLATILE PARALLEL UNSAFE;
+
+CREATE OR REPLACE FUNCTION ext_vacuum_statistics.extvac_reset_db_entry(dboid oid)
+RETURNS void
+AS 'MODULE_PATHNAME', 'extvac_reset_db_entry'
+LANGUAGE C STRICT VOLATILE PARALLEL UNSAFE;
+
+CREATE OR REPLACE FUNCTION ext_vacuum_statistics.vacuum_statistics_reset()
+RETURNS void
+AS 'MODULE_PATHNAME', 'vacuum_statistics_reset'
+LANGUAGE C STRICT VOLATILE PARALLEL UNSAFE;
+
+-- Reset privileges can be delegated explicitly, as for pg_stat_reset().
+REVOKE EXECUTE ON FUNCTION ext_vacuum_statistics.extvac_reset_entry(oid, oid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ext_vacuum_statistics.extvac_reset_db_entry(oid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ext_vacuum_statistics.vacuum_statistics_reset() FROM PUBLIC;
+
 -- Internal C function to fetch table vacuum stats
 CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_tables(
     IN  dboid oid,
@@ -357,3 +381,32 @@ GROUP BY dboid, dbname;
 COMMENT ON VIEW ext_vacuum_statistics.gp_stats_vacuum_database_summary IS
   'Extended vacuum statistics per database, summed over the cluster';
 
+--
+-- Cloudberry: resetting on the whole cluster.  The reset functions above act
+-- on the instance they are called on; these run them on the coordinator and
+-- on every segment.
+--
+CREATE FUNCTION ext_vacuum_statistics.gp_vacuum_statistics_reset()
+RETURNS void
+AS $$
+  SELECT ext_vacuum_statistics.vacuum_statistics_reset() FROM gp_dist_random('gp_id');
+  SELECT ext_vacuum_statistics.vacuum_statistics_reset();
+$$ LANGUAGE sql VOLATILE;
+
+CREATE FUNCTION ext_vacuum_statistics.gp_extvac_reset_entry(dboid oid, relid oid)
+RETURNS void
+AS $$
+  SELECT ext_vacuum_statistics.extvac_reset_entry(dboid, relid) FROM gp_dist_random('gp_id');
+  SELECT ext_vacuum_statistics.extvac_reset_entry(dboid, relid);
+$$ LANGUAGE sql STRICT VOLATILE;
+
+CREATE FUNCTION ext_vacuum_statistics.gp_extvac_reset_db_entry(dboid oid)
+RETURNS void
+AS $$
+  SELECT ext_vacuum_statistics.extvac_reset_db_entry(dboid) FROM gp_dist_random('gp_id');
+  SELECT ext_vacuum_statistics.extvac_reset_db_entry(dboid);
+$$ LANGUAGE sql STRICT VOLATILE;
+
+REVOKE EXECUTE ON FUNCTION ext_vacuum_statistics.gp_extvac_reset_entry(oid, oid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ext_vacuum_statistics.gp_extvac_reset_db_entry(oid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ext_vacuum_statistics.gp_vacuum_statistics_reset() FROM PUBLIC;

@@ -18,6 +18,7 @@
 #include "utils/pgstat_internal.h"
 #include "utils/pgstat_kind.h"
 #include "utils/tuplestore.h"
+#include "utils/timestamp.h"
 
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
@@ -46,6 +47,17 @@ typedef struct PgStatShared_ExtVacEntry
 	PgStat_VacuumRelationCounts stats;
 }			PgStatShared_ExtVacEntry;
 
+/* A reset clears counters, not the table/index/database discriminator. */
+static void
+extvac_reset_data(PgStatShared_Common *header)
+{
+	PgStatShared_ExtVacEntry *entry = (PgStatShared_ExtVacEntry *) header;
+	ExtVacReportType type = entry->stats.type;
+
+	memset(&entry->stats, 0, sizeof(entry->stats));
+	entry->stats.type = type;
+}
+
 /* PgStat kind for per-relation vacuum statistics (tables/indexes) */
 static const PgStat_KindInfo extvac_relation_kind_info = {
 	.name = "ext_vacuum_statistics_relation",
@@ -57,6 +69,7 @@ static const PgStat_KindInfo extvac_relation_kind_info = {
 	.shared_data_len = sizeof(PgStat_VacuumRelationCounts),
 	.pending_size = 0,
 	.flush_pending_cb = NULL,
+	.reset_data_cb = extvac_reset_data,
 };
 
 /* PgStat kind for per-database aggregated vacuum statistics */
@@ -70,6 +83,7 @@ static const PgStat_KindInfo extvac_db_kind_info = {
 	.shared_data_len = sizeof(PgStat_VacuumRelationCounts),
 	.pending_size = 0,
 	.flush_pending_cb = NULL,
+	.reset_data_cb = extvac_reset_data,
 };
 
 static inline void
@@ -211,6 +225,73 @@ pgstat_report_vacuum_extstats(Oid tableoid, bool shared,
 		extvac_store(dboid, tableoid, params, true, true);
 	if (prev_report_vacuum_hook)
 		prev_report_vacuum_hook(tableoid, shared, params);
+}
+
+/* Reset statistics for a single relation entry. */
+static void
+extvac_reset_by_relid(Oid dboid, Oid relid)
+{
+	pgstat_reset_entry(PGSTAT_KIND_EXTVAC_RELATION, dboid, relid,
+					   GetCurrentTimestamp());
+}
+
+/* Callback for pgstat_reset_matching_entries: match relation entries for given db */
+static bool
+match_extvac_relations_for_db(PgStatShared_HashEntry *entry, Datum match_data)
+{
+	return entry->key.kind == PGSTAT_KIND_EXTVAC_RELATION &&
+		entry->key.dboid == DatumGetObjectId(match_data);
+}
+
+/*
+ * Reset statistics for a database (aggregate entry) and all its relations.
+ */
+static void
+extvac_database_reset(Oid dboid)
+{
+	TimestampTz ts = GetCurrentTimestamp();
+
+	pgstat_reset_matching_entries(match_extvac_relations_for_db,
+								  ObjectIdGetDatum(dboid), ts);
+	pgstat_reset_entry(PGSTAT_KIND_EXTVAC_DB, dboid, InvalidOid, ts);
+}
+
+/* Reset all vacuum statistics (both relation and database entries). */
+static void
+extvac_stat_reset(void)
+{
+	pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_RELATION);
+	pgstat_reset_of_kind(PGSTAT_KIND_EXTVAC_DB);
+}
+
+PG_FUNCTION_INFO_V1(vacuum_statistics_reset);
+PG_FUNCTION_INFO_V1(extvac_reset_entry);
+PG_FUNCTION_INFO_V1(extvac_reset_db_entry);
+
+Datum
+vacuum_statistics_reset(PG_FUNCTION_ARGS)
+{
+	extvac_stat_reset();
+	PG_RETURN_VOID();
+}
+
+Datum
+extvac_reset_entry(PG_FUNCTION_ARGS)
+{
+	Oid			dboid = PG_GETARG_OID(0);
+	Oid			relid = PG_GETARG_OID(1);
+
+	extvac_reset_by_relid(dboid, relid);
+	PG_RETURN_VOID();
+}
+
+Datum
+extvac_reset_db_entry(PG_FUNCTION_ARGS)
+{
+	Oid			dboid = PG_GETARG_OID(0);
+
+	extvac_database_reset(dboid);
+	PG_RETURN_VOID();
 }
 
 /*
