@@ -541,6 +541,7 @@ ao_vacuum_rel(Relation rel, VacuumParams *params, BufferAccessStrategy bstrategy
 		stats.tuples_moved = vacrelstats->tuples_moved;
 		stats.pages_removed = vacrelstats->nbytes_truncated / BLCKSZ +
 			(vacrelstats->nbytes_truncated % BLCKSZ != 0);
+		pgstat_report_vacuum_stats(rel, &stats);
 
 		/* The last phase: report only the phases executed by this worker. */
 		pgstat_report_vacuum_elapsed(RelationGetRelid(rel),
@@ -805,7 +806,7 @@ vacuum_appendonly_indexes(Relation aoRelation, int options, Bitmapset *dead_segs
 						   elevel,
 						   bstrategy,
 						   &result);
-				vacuum_measure_index_stats(Irel[i], &result, 0, 0, final_cleanup);
+				vacuum_report_index_stats(Irel[i], &result, 0, 0, final_cleanup);
 				ao_report_index_vacuum_time(Irel[i], istarttime, startdelaytime);
 				if (set_report_vacuum_hook)
 					ao_measure_index_resources(Irel[i], extcounters, &result,
@@ -829,7 +830,7 @@ vacuum_appendonly_indexes(Relation aoRelation, int options, Bitmapset *dead_segs
 										bstrategy,
 										vacrelstats,
 										&result);
-				vacuum_measure_index_stats(Irel[i], &result, 0, 0, final_cleanup);
+				vacuum_report_index_stats(Irel[i], &result, 0, 0, final_cleanup);
 				ao_report_index_vacuum_time(Irel[i], istarttime, startdelaytime);
 				if (set_report_vacuum_hook)
 					ao_measure_index_resources(Irel[i], extcounters, &result,
