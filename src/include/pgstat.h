@@ -772,6 +772,13 @@ extern void pgstat_report_index_vacuum_time(Relation rel,
 											bool is_autovacuum);
 extern void pgstat_count_vacuum_error(bool shared);
 
+extern void pgstat_report_vacuum_ext(Relation rel,
+									 PgStat_Counter livetuples,
+									 PgStat_Counter deadtuples,
+									 TimestampTz starttime,
+									 PgStat_Counter delaytime,
+									 bool failsafe,
+									 PgStat_VacuumRelationCounts * extstats);
 
 /* Hook for extensions to receive extended vacuum statistics */
 typedef void (*set_report_vacuum_hook_type) (Oid tableoid, bool shared,

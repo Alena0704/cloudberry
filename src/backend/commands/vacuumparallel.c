@@ -910,6 +910,7 @@ parallel_vacuum_process_one_index(ParallelVacuumState *pvs, Relation indrel,
 			extVacReport->pages_deleted =
 				istat_res->pages_newly_deleted - prev_pages_newly_deleted;
 		}
+		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, extVacReport);
 		pfree(extVacCounters);
 	}
 

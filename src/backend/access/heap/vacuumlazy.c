@@ -805,17 +805,28 @@ heap_vacuum_rel(Relation rel, VacuumParams *params,
 		extvac_stats_end(rel, extVacCounters, &extVacReport->common);
 		accumulate_heap_vacuum_statistics(vacrel, extVacReport);
 
+		pgstat_report_vacuum_ext(rel,
+								 Max(vacrel->new_live_tuples, 0),
+								 vacrel->recently_dead_tuples +
+								 vacrel->missed_dead_tuples,
+								 starttime,
+								 (PgStat_Counter) rint(VacuumDelayTime -
+													   startdelaytime),
+								 VacuumFailsafeActive,
+								 extVacReport);
 		pfree(extVacCounters);
 		pfree(vacrel->extVacReportIdx);
 	}
-	pgstat_report_vacuum(RelationGetRelid(rel),
-						 rel->rd_rel->relisshared,
-						 Max(vacrel->new_live_tuples, 0),
-						 vacrel->recently_dead_tuples +
-						 vacrel->missed_dead_tuples,
-						 starttime,
-						 (PgStat_Counter) rint(VacuumDelayTime - startdelaytime),
-						 VacuumFailsafeActive);
+	else
+		pgstat_report_vacuum_ext(rel,
+								 Max(vacrel->new_live_tuples, 0),
+								 vacrel->recently_dead_tuples +
+								 vacrel->missed_dead_tuples,
+								 starttime,
+								 (PgStat_Counter) rint(VacuumDelayTime -
+													   startdelaytime),
+								 VacuumFailsafeActive,
+								 NULL);
 	pgstat_progress_end_command();
 
 	if (instrument)
@@ -3013,6 +3024,7 @@ lazy_vacuum_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 				istat->pages_newly_deleted - prev_pages_newly_deleted :
 				istat->pages_newly_deleted;
 		}
+		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, extVacReport);
 		accumulate_idxs_vacuum_statistics(vacrel, extVacReport);
 		pfree(extVacCounters);
 	}
@@ -3109,6 +3121,7 @@ lazy_cleanup_one_index(Relation indrel, IndexBulkDeleteResult *istat,
 			if (istat->pages_deleted > istat->pages_free)
 				extVacReport->dead_pages = istat->pages_deleted - istat->pages_free;
 		}
+		pgstat_report_vacuum_ext(indrel, -1, -1, 0, 0, false, extVacReport);
 		accumulate_idxs_vacuum_statistics(vacrel, extVacReport);
 		pfree(extVacCounters);
 	}
