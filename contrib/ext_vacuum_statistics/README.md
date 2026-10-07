@@ -167,3 +167,51 @@ by the reporting worker. Gaps between phases are excluded. If a worker is
 replaced between phases, only the replacement worker's phases are reported.
 Removed tuple and byte counters use 64 bits; conversion of released bytes
 to heap-equivalent pages preserves the 64-bit range.
+
+## Cloudberry
+
+Each instance (the coordinator and every segment) keeps the statistics of the
+vacuums it runs itself; the views show the statistics of the instance they are
+queried on.  Load the module on all instances, mirrors and the standby
+coordinator included, and restart the cluster:
+
+```
+gpconfig -c shared_preload_libraries -v '<existing libraries>,ext_vacuum_statistics'
+gpstop -ar
+```
+
+Cluster-wide views, like the `gp_stat_*` views of the core:
+
+| View | Description |
+|------|-------------|
+| `ext_vacuum_statistics.gp_stats_vacuum_tables` | `pg_stats_vacuum_tables` of every instance, with `gp_segment_id` (-1 for the coordinator) |
+| `ext_vacuum_statistics.gp_stats_vacuum_indexes` | the same for indexes |
+| `ext_vacuum_statistics.gp_stats_vacuum_database` | the same for databases |
+| `ext_vacuum_statistics.gp_stats_vacuum_tables_summary` | one row per table: summed over the segments (divided by their number for replicated tables); catalogs as on the coordinator |
+| `ext_vacuum_statistics.gp_stats_vacuum_indexes_summary` | the same for indexes |
+| `ext_vacuum_statistics.gp_stats_vacuum_database_summary` | one row per database, summed over all instances |
+
+The reset functions act on the instance they are called on;
+`gp_vacuum_statistics_reset()`, `gp_extvac_reset_entry(dboid, relid)` and
+`gp_extvac_reset_db_entry(dboid)` run them on the whole cluster.  A `SET` of
+`vacuum_statistics.enabled` on the coordinator is passed on to the segments.
+
+The statistics are not replicated: after a failover the promoted mirror starts
+with empty statistics, as with the built-in cumulative statistics.
+
+The test of the cluster-wide views runs against such a cluster:
+
+```
+make -C contrib/ext_vacuum_statistics installcheck-cluster
+```
+
+Reset functions return `void` and require superuser privileges by default.
+An administrator can delegate access with `GRANT EXECUTE`; cluster wrappers
+also require permission to execute the corresponding local reset function.
+A relation reset clears only that relation's counters, leaving its indexes and
+the database aggregate unchanged. A database reset clears its aggregate and
+all its relation entries. The global reset affects all databases on the current
+instance; the `gp_` wrappers apply these operations on every instance.
+Existing rows remain visible with zero counters until another vacuum updates
+them. `pg_stat_reset()` also resets the extension's entries for the current
+database. Resetting does not remove the type of a table, index, or database entry.
