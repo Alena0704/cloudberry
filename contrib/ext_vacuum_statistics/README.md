@@ -1,0 +1,217 @@
+# ext_vacuum_statistics
+
+Extended vacuum statistics extension for PostgreSQL. It collects and exposes detailed per-table, per-index, and per-database vacuum statistics (buffer I/O, WAL, general, timing) via convenient views in the `ext_vacuum_statistics` schema.
+
+## Installation
+
+```
+./configure tmp_install="$(pwd)/my/inst"
+make clean && make && make install
+cd contrib/ext_vacuum_statistics
+make && make install
+```
+
+It is essential that the extension is listed in `shared_preload_libraries` because it registers a vacuum hook at server startup.
+
+In your `postgresql.conf`:
+
+```
+shared_preload_libraries = 'ext_vacuum_statistics'
+```
+
+Restart PostgreSQL.
+
+In your database:
+
+```sql
+CREATE EXTENSION ext_vacuum_statistics;
+```
+
+## Usage
+
+Query vacuum statistics via the provided views:
+
+```sql
+-- Per-table heap and append-optimized vacuum statistics
+SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_tables;
+
+-- Per-index vacuum statistics
+SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_indexes;
+
+-- Per-database aggregate vacuum statistics
+SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_database;
+```
+
+Example output:
+
+```
+ relname   | total_blks_read | total_blks_hit | wal_records | tuples_deleted | pages_removed
+-----------+-----------------+----------------+-------------+----------------+---------------
+ mytable   |             120 |            340 |          15 |            500 |            10
+```
+
+Reset statistics when needed:
+
+```sql
+SELECT ext_vacuum_statistics.vacuum_statistics_reset();
+```
+
+## Configuration (GUCs)
+
+| GUC | Default | Description |
+|-----|---------|-------------|
+| `vacuum_statistics.enabled` | on | Enable extended vacuum statistics collection |
+
+## Memory usage
+
+Each tracked object (table or index) uses a fixed-size shared memory entry; the exact size depends on the platform.
+
+Example: a database with 1000 tables and 2000 indexes, all tracked, uses about **700 KB** on Ubuntu (3001 entries × 232 bytes). Per-database entries add one entry per tracked database.
+
+The entry of a table or an index is dropped when the relation is dropped (at
+commit, so a rolled back `DROP` keeps it), and a new relation that gets the OID
+of an old one starts from zero.  The module does that with an
+`object_access_hook`.
+
+## Recipes
+
+**Disable statistics collection temporarily:**
+
+```sql
+SET vacuum_statistics.enabled = off;
+```
+
+## Views
+
+| View | Description |
+|------|-------------|
+| `ext_vacuum_statistics.pg_stats_vacuum_tables` | Per-table heap vacuum stats (pages scanned, tuples deleted, dead tuples, etc.) |
+| `ext_vacuum_statistics.pg_stats_vacuum_indexes` | Per-index vacuum stats |
+| `ext_vacuum_statistics.pg_stats_vacuum_database` | Per-database aggregate vacuum stats |
+
+## Limitations
+
+- Must be loaded via `shared_preload_libraries`; it cannot be loaded on demand.
+- Starting a server without the module, even once, makes it treat the whole
+  statistics file as corrupted and reset all cumulative statistics, the
+  built-in ones included.  Use `vacuum_statistics.enabled = off` rather than
+  removing the module.
+
+## Native work counters
+
+Heap, index and AO work is also collected by the built-in statistics system
+without this module. Use `pg_stat_vacuum_tables`, `pg_stat_vacuum_indexes`
+and `pg_stat_vacuum` (and their `gp_stat_*` counterparts) for native counters.
+They obey `track_counts` and ordinary `pg_stat_reset*` functions. The extension
+retains its existing counters for compatibility and adds resource measurements
+such as buffers and WAL. Its counters obey `vacuum_statistics.enabled` and
+its own reset functions; resetting one collection does not reset the other.
+
+## Heap page counters
+
+`pages_frozen` accumulates pages on which vacuum froze at least one tuple.
+`pages_all_visible` accumulates pages whose visibility-map all-visible bit
+vacuum changed from unset to set, including empty pages. These count work
+across vacuums, not the current number of frozen or all-visible pages. A
+page can be counted again after later changes require new work; rescanning
+an unchanged page or adding only its all-frozen bit does not add to
+`pages_all_visible`. Both counters survive clean restarts and are cleared
+by statistics resets.
+
+`dead_pages` accumulates heap pages containing tuples that are dead but
+not yet removable (for example, because an old snapshot still needs them).
+It differs from `missed_dead_pages`, which counts pages with removable tuples
+that vacuum could not remove. For indexes, `dead_pages` accumulates deleted
+pages not yet reusable, sampled once after cleanup. Repeated observations
+are counted again; this is not a snapshot of the current relation.
+
+`freeze_age_vacuum_count` counts heap vacuums made aggressive by the XID or
+MultiXact freeze table age, including `VACUUM FREEZE`. Forcing a scan with
+`DISABLE_PAGE_SKIPPING` alone does not increment it, and entering failsafe
+mode is counted separately. Both new counters survive clean restarts and
+are cleared by statistics resets.
+
+## Append-optimized tables
+
+AO row and AOCS tables and their indexes are reported too.  For the table,
+`tuples_deleted` is the number of dead tuples the compaction discarded and
+`pages_removed` the space released by truncating and dropping segment files,
+in heap-equivalent pages. `pages_scanned` counts the data scanned during
+compaction in those units, rounded up per compacted segment (source EOF for
+AO row, scan bytes read for AOCS). `compacted_segments` and `tuples_moved`
+accumulate actual compactions and live rows moved; skipped candidates add
+nothing. `total_file_segs` is the segment metadata entry count after the
+latest vacuum, including empty and awaiting-drop entries. It is replaced on
+each vacuum, not accumulated; AOCS counts segment numbers, not individual
+column files. A statistics reset clears these values, and the next vacuum
+refreshes the segment count even without compaction. All three AO-specific
+fields stay zero for heap tables.
+
+`recently_dead_tuples` accumulates the hidden rows remaining in the AO
+visibility map after post-cleanup. This includes rows left because
+compaction is disabled or below its threshold. Each completed vacuum adds
+its remaining count, so two vacuums that both leave 100 hidden rows add
+200; it is not a snapshot or a count of distinct rows. Once compaction
+removes those rows, later vacuums add zero. Statistics resets clear the
+counter, and clean restarts preserve it.
+
+The heap-only counters (`pages_frozen`, `pages_all_visible`,
+`tuples_frozen`, `missed_dead_*`, `dead_pages`, `freeze_age_vacuum_count`) stay zero for AO. The
+resource usage covers all phases of the vacuum, which is reported at the end
+of the last one.  The compaction moves live tuples to another segment file,
+so an index's `tuples_deleted` counts the entries of the moved live tuples
+too.
+
+AO vacuum time and cost delay are summed over the active phases executed
+by the reporting worker. Gaps between phases are excluded. If a worker is
+replaced between phases, only the replacement worker's phases are reported.
+Removed tuple and byte counters use 64 bits; conversion of released bytes
+to heap-equivalent pages preserves the 64-bit range.
+
+## Cloudberry
+
+Each instance (the coordinator and every segment) keeps the statistics of the
+vacuums it runs itself; the views show the statistics of the instance they are
+queried on.  Load the module on all instances, mirrors and the standby
+coordinator included, and restart the cluster:
+
+```
+gpconfig -c shared_preload_libraries -v '<existing libraries>,ext_vacuum_statistics'
+gpstop -ar
+```
+
+Cluster-wide views, like the `gp_stat_*` views of the core:
+
+| View | Description |
+|------|-------------|
+| `ext_vacuum_statistics.gp_stats_vacuum_tables` | `pg_stats_vacuum_tables` of every instance, with `gp_segment_id` (-1 for the coordinator) |
+| `ext_vacuum_statistics.gp_stats_vacuum_indexes` | the same for indexes |
+| `ext_vacuum_statistics.gp_stats_vacuum_database` | the same for databases |
+| `ext_vacuum_statistics.gp_stats_vacuum_tables_summary` | one row per table: summed over the segments (divided by their number for replicated tables); catalogs as on the coordinator |
+| `ext_vacuum_statistics.gp_stats_vacuum_indexes_summary` | the same for indexes |
+| `ext_vacuum_statistics.gp_stats_vacuum_database_summary` | one row per database, summed over all instances |
+
+The reset functions act on the instance they are called on;
+`gp_vacuum_statistics_reset()`, `gp_extvac_reset_entry(dboid, relid)` and
+`gp_extvac_reset_db_entry(dboid)` run them on the whole cluster.  A `SET` of
+`vacuum_statistics.enabled` on the coordinator is passed on to the segments.
+
+The statistics are not replicated: after a failover the promoted mirror starts
+with empty statistics, as with the built-in cumulative statistics.
+
+The test of the cluster-wide views runs against such a cluster:
+
+```
+make -C contrib/ext_vacuum_statistics installcheck-cluster
+```
+
+Reset functions return `void` and require superuser privileges by default.
+An administrator can delegate access with `GRANT EXECUTE`; cluster wrappers
+also require permission to execute the corresponding local reset function.
+A relation reset clears only that relation's counters, leaving its indexes and
+the database aggregate unchanged. A database reset clears its aggregate and
+all its relation entries. The global reset affects all databases on the current
+instance; the `gp_` wrappers apply these operations on every instance.
+Existing rows remain visible with zero counters until another vacuum updates
+them. `pg_stat_reset()` also resets the extension's entries for the current
+database. Resetting does not remove the type of a table, index, or database entry.
