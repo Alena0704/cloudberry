@@ -712,10 +712,29 @@
   </para>
 
   <para>
-   Reset functions operate only on the current node. Calling one on the
-   coordinator (QD) leaves the segment counters unchanged. They can also be
-   used in a utility connection to an individual segment.
+   For Cloudberry, use the <literal>gp_</literal> wrappers from a normal
+   coordinator connection to reset statistics across the cluster. These
+   wrappers reset the coordinator and all primary segments. For example,
+   to reset vacuum statistics for all databases across the cluster:
+<programlisting>
+SELECT ext_vacuum_statistics.gp_vacuum_statistics_reset();
+</programlisting>
+   Delegating access to a cluster wrapper also requires granting access to
+   its corresponding local reset function.
   </para>
+
+  <note>
+   <para>
+    Functions without the <literal>gp_</literal> prefix reset statistics
+    <emphasis>only on the current node</emphasis>. Calling
+    <function>ext_vacuum_statistics.vacuum_statistics_reset()</function>
+    on the coordinator (QD) resets only the coordinator's counters;
+    segment counters remain unchanged. The same applies to
+    <function>ext_vacuum_statistics.extvac_reset_entry()</function> and
+    <function>ext_vacuum_statistics.extvac_reset_db_entry()</function>.
+    Use the local functions in a utility connection to an individual segment.
+   </para>
+  </note>
 
   <variablelist>
    <varlistentry>
@@ -758,7 +777,57 @@
      </para>
     </listitem>
    </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>ext_vacuum_statistics.gp_vacuum_statistics_reset()</function>
+     <returnvalue>void</returnvalue>
+    </term>
+    <listitem>
+     <para>
+      Calls <function>vacuum_statistics_reset()</function> on the coordinator
+      and all primary segments, resetting statistics for all databases.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>ext_vacuum_statistics.gp_extvac_reset_entry(<parameter>dboid</parameter> <type>oid</type>, <parameter>relid</parameter> <type>oid</type>)</function>
+     <returnvalue>void</returnvalue>
+    </term>
+    <listitem>
+     <para>
+      Calls <function>extvac_reset_entry(<parameter>dboid</parameter>, <parameter>relid</parameter>)</function>
+      on the coordinator and all primary segments, resetting statistics for
+      one table or index. The database aggregate and other relations are
+      unchanged.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term>
+     <function>ext_vacuum_statistics.gp_extvac_reset_db_entry(<parameter>dboid</parameter> <type>oid</type>)</function>
+     <returnvalue>void</returnvalue>
+    </term>
+    <listitem>
+     <para>
+      Calls <function>extvac_reset_db_entry(<parameter>dboid</parameter>)</function>
+      on the coordinator and all primary segments, resetting the database
+      aggregate and the statistics of all its tables and indexes.
+     </para>
+    </listitem>
+   </varlistentry>
   </variablelist>
+
+  <para>
+   To reset the current database across the cluster, run on the coordinator:
+<programlisting>
+SELECT ext_vacuum_statistics.gp_extvac_reset_db_entry(oid)
+FROM pg_database WHERE datname = current_database();
+</programlisting>
+  </para>
  </sect2>
 
  <sect2 id="extvacuumstatistics-append-optimized">
@@ -836,7 +905,9 @@
      and <literal>ao_post_cleanup_*</literal> columns split these cumulative
      resources by phase. Their sum equals the corresponding table total,
      apart from floating-point rounding of I/O times. Phase counters exclude
-     index resources.
+     index resources and use the same replicated-table normalization as
+     other table counters in cluster summaries. Independently rounded integer
+     fields in replicated summaries can differ by rounding.
     </para>
    </listitem>
    <listitem>
@@ -856,6 +927,8 @@
   own OIDs; their indexes appear in the index views. Their later heap vacuum
   is not added to the parent AO phase counters. The auxiliary table OIDs in
   <structname>pg_appendonly</structname> associate these rows with the parent.
+  Cluster summaries use that parent's replication divisor for auxiliary
+  tables and their indexes.
  </para>
 
  </sect2>
@@ -915,34 +988,79 @@
   </para>
 
   <para>
-   The reset functions act on the instance they are called on.
+   The reset functions without the <literal>gp_</literal> prefix act only on
+   the connected instance.
    <function>ext_vacuum_statistics.gp_vacuum_statistics_reset()</function>,
    <function>ext_vacuum_statistics.gp_extvac_reset_entry(<parameter>dboid</parameter>, <parameter>relid</parameter>)</function>
    and
    <function>ext_vacuum_statistics.gp_extvac_reset_db_entry(<parameter>dboid</parameter>)</function>
-   call them on the coordinator and on every segment.
+   call them on the coordinator and on every primary segment. Call these
+   wrappers from a normal coordinator connection; use the local functions
+   in utility mode. See <xref linkend="extvacuumstatistics-functions"/>.
   </para>
 
   <para>
-   The module has to be loaded on every instance, mirrors and the standby
-   coordinator included, since a mirror that is promoted runs the vacuums of
-   its primary from then on.  Add it to the existing list of preloaded
-   libraries (<command>gpconfig -s shared_preload_libraries</command> shows
-   it) and restart the cluster:
+   Install the matching extension library, control and SQL files in the
+   Cloudberry installation on every host, including mirror and standby
+   coordinator hosts. <command>gpconfig</command> updates configuration files;
+   it does not distribute the extension files. The module must be preloaded
+   on every instance so that it is available after promotion.
+  </para>
+
+  <para>
+   Inspect the active setting and the configuration files:
 <programlisting>
-gpconfig -c shared_preload_libraries -v '<replaceable>existing_libraries</replaceable>,ext_vacuum_statistics'
-gpstop -ar
+gpconfig -s shared_preload_libraries
+gpconfig -s shared_preload_libraries --file
 </programlisting>
-   Then run <command>CREATE EXTENSION ext_vacuum_statistics</command> in each
-   database; the command is dispatched to the segments.
+   If the existing list is empty, set it as follows:
+<programlisting>
+gpconfig -c shared_preload_libraries -v 'ext_vacuum_statistics'
+</programlisting>
+   Otherwise pass the complete existing list with
+   <literal>ext_vacuum_statistics</literal> appended. Preserve other preloaded
+   libraries and any intentional differences between coordinator, primary
+   and mirror settings. With <option>-v</option> and no role restriction,
+   <command>gpconfig</command> updates the coordinator, standby, primaries and
+   mirrors. Resolve any reported unreachable hosts before relying on their
+   configuration. Check the resulting files and restart the cluster:
+<programlisting>
+gpconfig -s shared_preload_libraries --file
+gpstop -ar
+gpconfig -s shared_preload_libraries --file-compare
+</programlisting>
+   A reload with <command>gpstop -u</command> alone cannot load a new preload
+   library. Check that the mirror and standby instances also restarted
+   successfully. Then run
+   <command>CREATE EXTENSION IF NOT EXISTS ext_vacuum_statistics</command>
+   on the coordinator in each database where the views are needed; this
+   command is dispatched to the segments.
   </para>
 
   <para>
-   The warning above about starting an instance without the module applies
-   to each instance separately: a segment started without it loses all of its
-   cumulative statistics.  The statistics are not replicated to mirrors, so
-   after a failover the promoted mirror starts with empty statistics, just
-   like the built-in cumulative statistics.
+   The warning above about starting without the module applies separately
+   to each instance that has saved statistics of its custom kinds. Keep the
+   module preloaded when disabling collection to preserve that instance's
+   cumulative statistics.
+  </para>
+
+  <para>
+   The counters are local <literal>pgstat</literal> state, not replicated
+   through WAL. Preloading the module on a mirror enables collection after
+   promotion but does not copy its primary's accumulated counters. A promoted
+   instance reports its own local statistics and cannot continue the former
+   primary's counter history. This also applies to standby coordinator
+   promotion. A compatible clean restart can preserve an instance's own
+   statistics; crash recovery resets them.
+  </para>
+
+  <para>
+   Start a new measurement interval for an instance after promotion, even
+   when its <structfield>gp_segment_id</structfield> is unchanged. Other
+   instances keep their counters, but cluster summaries can decrease when
+   a primary is replaced. Monitoring should retain earlier samples externally
+   and establish a new baseline after failover; the discontinuity does not
+   represent negative vacuum work.
   </para>
 
   <para>

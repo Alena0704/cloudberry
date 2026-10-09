@@ -21,6 +21,8 @@
 -- in shared_preload_libraries of every instance ("make installcheck-cluster").
 --
 CREATE EXTENSION IF NOT EXISTS ext_vacuum_statistics;
+-- Missing optimizer statistics notices are unrelated to vacuum accounting.
+SET optimizer_print_missing_stats = off;
 SELECT ext_vacuum_statistics.gp_vacuum_statistics_reset();
 
 CREATE TABLE gpvs_ao_row (id int, v text) WITH (appendonly = true)
@@ -44,6 +46,23 @@ SELECT relname, tuples_deleted, pages_removed > 0 AS pages_removed,
   FROM ext_vacuum_statistics.gp_stats_vacuum_tables_summary
  WHERE relname LIKE 'gpvs_ao_%'
  ORDER BY relname;
+
+-- Phase resources exclude index work and sum to the table totals on every
+-- instance. The awaiting-drop snapshot is a subset of segment metadata.
+SELECT relname,
+       bool_and(awaiting_drop_segments >= 0 AND awaiting_drop_segments <= total_file_segs
+                AND total_blks_read = ao_pre_cleanup_blks_read + ao_compaction_blks_read + ao_post_cleanup_blks_read
+                AND total_blks_hit = ao_pre_cleanup_blks_hit + ao_compaction_blks_hit + ao_post_cleanup_blks_hit
+                AND total_blks_dirtied = ao_pre_cleanup_blks_dirtied + ao_compaction_blks_dirtied + ao_post_cleanup_blks_dirtied
+                AND total_blks_written = ao_pre_cleanup_blks_written + ao_compaction_blks_written + ao_post_cleanup_blks_written
+                AND wal_records = ao_pre_cleanup_wal_records + ao_compaction_wal_records + ao_post_cleanup_wal_records
+                AND wal_fpi = ao_pre_cleanup_wal_fpi + ao_compaction_wal_fpi + ao_post_cleanup_wal_fpi
+                AND wal_bytes = ao_pre_cleanup_wal_bytes + ao_compaction_wal_bytes + ao_post_cleanup_wal_bytes
+                AND abs(blk_read_time - (ao_pre_cleanup_blk_read_time + ao_compaction_blk_read_time + ao_post_cleanup_blk_read_time)) < 0.000001
+                AND abs(blk_write_time - (ao_pre_cleanup_blk_write_time + ao_compaction_blk_write_time + ao_post_cleanup_blk_write_time)) < 0.000001) AS phase_totals_match
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables
+ WHERE relname IN ('gpvs_ao_row', 'gpvs_ao_col')
+ GROUP BY relname ORDER BY relname;
 
 -- AO compaction work is cumulative; the segment count is a snapshot.
 SELECT relname, total_file_segs > 0 AS has_segments,
@@ -138,3 +157,36 @@ SELECT count(*) AS segment_entries FROM gp_dist_random('gpvs_ao_entry');
 DROP TABLE gpvs_ao_row, gpvs_ao_col;
 SELECT count(*) AS segment_entries FROM gp_dist_random('gpvs_ao_entry');
 DROP VIEW gpvs_ao_entry;
+
+-- Replicated AO summaries average phase resources and the segment snapshot.
+CREATE TABLE gpvs_ao_repl (id int) WITH (appendonly = true) DISTRIBUTED REPLICATED;
+INSERT INTO gpvs_ao_repl SELECT generate_series(1, 1000);
+DELETE FROM gpvs_ao_repl WHERE id <= 500;
+VACUUM gpvs_ao_repl;
+SELECT s.tuples_deleted = 500 AND s.ao_compaction_wal_records > 0
+       AND s.ao_pre_cleanup_blks_hit = round(d.pre_hits / p.numsegments)
+       AND s.ao_compaction_wal_records = round(d.compact_wal / p.numsegments)
+       AND s.ao_post_cleanup_blks_hit = round(d.post_hits / p.numsegments)
+       AND s.awaiting_drop_segments = round(d.awaiting / p.numsegments)
+         AS replicated_phases_match
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables_summary s
+  JOIN gp_distribution_policy p ON p.localoid = s.relid
+  JOIN (SELECT relid, sum(ao_pre_cleanup_blks_hit) AS pre_hits,
+               sum(ao_compaction_wal_records) AS compact_wal,
+               sum(ao_post_cleanup_blks_hit) AS post_hits,
+               sum(awaiting_drop_segments) AS awaiting
+          FROM ext_vacuum_statistics.gp_stats_vacuum_tables
+         WHERE relname = 'gpvs_ao_repl' AND gp_segment_id >= 0
+         GROUP BY relid) d ON d.relid = s.relid
+ WHERE s.relname = 'gpvs_ao_repl';
+SELECT ext_vacuum_statistics.gp_extvac_reset_entry(
+  (SELECT oid FROM pg_database WHERE datname = current_database()), 'gpvs_ao_repl'::regclass);
+SELECT count(*) = (SELECT count(*) FROM gp_segment_configuration WHERE role = 'p')
+       AND bool_and(awaiting_drop_segments = 0
+                    AND ao_pre_cleanup_blks_hit = 0 AND ao_pre_cleanup_wal_records = 0
+                    AND ao_compaction_blks_hit = 0 AND ao_compaction_wal_records = 0
+                    AND ao_post_cleanup_blks_hit = 0 AND ao_post_cleanup_wal_records = 0)
+         AS phase_counters_reset
+  FROM ext_vacuum_statistics.gp_stats_vacuum_tables WHERE relname = 'gpvs_ao_repl';
+DROP TABLE gpvs_ao_repl;
+RESET optimizer_print_missing_stats;

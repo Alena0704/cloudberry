@@ -29,20 +29,24 @@ CREATE EXTENSION ext_vacuum_statistics;
 
 ## Usage
 
-Query vacuum statistics via the provided views:
+From a Cloudberry coordinator, query statistics across the cluster:
 
 ```sql
--- Per-table heap and append-optimized vacuum statistics
-SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_tables;
+-- Per-table heap and append-optimized vacuum statistics, with gp_segment_id
+SELECT * FROM ext_vacuum_statistics.gp_stats_vacuum_tables;
 
 -- Per-index vacuum statistics
-SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_indexes;
+SELECT * FROM ext_vacuum_statistics.gp_stats_vacuum_indexes;
 
 -- Per-database aggregate vacuum statistics
-SELECT * FROM ext_vacuum_statistics.pg_stats_vacuum_database;
+SELECT * FROM ext_vacuum_statistics.gp_stats_vacuum_database;
 ```
 
-Example output:
+The corresponding `pg_stats_vacuum_*` views read only the connected instance.
+Use them for a standalone server or a utility connection to a single segment.
+Use the `gp_stats_vacuum_*_summary` views for cluster totals.
+
+Example projection of table statistics:
 
 ```
  relname   | total_blks_read | total_blks_hit | wal_records | tuples_deleted | pages_removed
@@ -50,15 +54,35 @@ Example output:
  mytable   |             120 |            340 |          15 |            500 |            10
 ```
 
-Reset statistics only on the current node:
+Reset statistics across the cluster from the coordinator:
 
 ```sql
-SELECT ext_vacuum_statistics.vacuum_statistics_reset();
+SELECT ext_vacuum_statistics.gp_vacuum_statistics_reset();
 ```
 
-The reset functions act only on the current node. Calling one on the
-coordinator (QD) leaves segment counters unchanged. This also applies to
-`extvac_reset_entry()` and `extvac_reset_db_entry()`.
+Use the `gp_` wrappers from a normal coordinator connection to reset statistics
+on the coordinator and all primary segments.
+
+**Local functions reset only the current node.** Calling
+`ext_vacuum_statistics.vacuum_statistics_reset()` on the coordinator (QD)
+resets only the coordinator's counters; segment counters remain unchanged.
+The same applies to `extvac_reset_entry()` and `extvac_reset_db_entry()`.
+Use the local functions for a utility connection to an individual segment.
+
+All functions below belong to the `ext_vacuum_statistics` schema:
+
+| Reset scope | Cluster wrapper (call on the coordinator) | Local function (current node only) |
+|-------------|------------------------------------------|-----------------------------------|
+| One table or index | `gp_extvac_reset_entry(dboid, relid)` | `extvac_reset_entry(dboid, relid)` |
+| One database and all its relations | `gp_extvac_reset_db_entry(dboid)` | `extvac_reset_db_entry(dboid)` |
+| All databases | `gp_vacuum_statistics_reset()` | `vacuum_statistics_reset()` |
+
+For example, reset only the current database across the cluster:
+
+```sql
+SELECT ext_vacuum_statistics.gp_extvac_reset_db_entry(oid)
+FROM pg_database WHERE datname = current_database();
+```
 
 ## Configuration (GUCs)
 
@@ -169,7 +193,9 @@ shared and local buffers, as in `total_blks_*`; I/O times are milliseconds
 and require `track_io_timing`. Index resource usage is excluded from its
 phase and remains in the index statistics. The three phase counters sum to
 the corresponding table total (apart from floating-point rounding of times).
-Heap tables have zero phase counters.
+Heap tables have zero phase counters. Cluster summaries use the same
+sum/replicated-average rules as the other table fields. In replicated
+summaries, independently rounded integer fields can differ by rounding.
 
 All new fields obey collection control and resets and survive clean
 restarts. Failed vacuums do not publish a table report; replacement workers
@@ -205,18 +231,53 @@ heap-statistics rows under their own OIDs and names. Their indexes are shown
 in the index views. The parent AO row describes its phases; the later heap
 vacuum of auxiliary relations is not added to it. To associate an auxiliary
 row with its parent, join its `relid` to `pg_appendonly.segrelid`,
-`visimaprelid` or `blkdirrelid`.
+`visimaprelid` or `blkdirrelid`. Cluster summaries use the parent table's
+replication divisor for auxiliary relations and their indexes too.
 
 ## Cloudberry
 
 Each instance (the coordinator and every segment) keeps the statistics of the
-vacuums it runs itself; the views show the statistics of the instance they are
-queried on.  Load the module on all instances, mirrors and the standby
-coordinator included, and restart the cluster:
+vacuums it runs itself. The local `pg_stats_vacuum_*` views show only that
+instance; use `gp_stats_vacuum_*` to read the coordinator and primary segments.
 
+Install the matching extension library, control and SQL files in the Cloudberry
+installation on every host, including mirror and standby coordinator hosts.
+`gpconfig` changes configuration files; it does not distribute extension files.
+Load the module on every instance so it is also available after promotion.
+
+Inspect both the active setting and the configuration files first:
+
+```sh
+gpconfig -s shared_preload_libraries
+gpconfig -s shared_preload_libraries --file
 ```
-gpconfig -c shared_preload_libraries -v '<existing libraries>,ext_vacuum_statistics'
+
+When the existing list is empty, configure it with:
+
+```sh
+gpconfig -c shared_preload_libraries -v 'ext_vacuum_statistics'
+```
+
+Otherwise pass the complete existing list with `ext_vacuum_statistics` appended.
+Preserve any intentional differences between coordinator, primary and mirror
+settings; do not replace their other preloaded libraries. With `-v` and no
+role restriction, `gpconfig` updates the coordinator, standby, primaries and
+mirrors. Resolve any reported unreachable hosts before relying on their setup.
+Check the resulting files, then restart the cluster to load the library:
+
+```sh
+gpconfig -s shared_preload_libraries --file
 gpstop -ar
+gpconfig -s shared_preload_libraries --file-compare
+```
+
+A configuration reload (`gpstop -u`) alone cannot load a new preload library.
+Check that mirror and standby instances also restarted successfully. After the
+restart, run the following on the coordinator in each database where the views
+are needed; `CREATE EXTENSION` is dispatched to the segments:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS ext_vacuum_statistics;
 ```
 
 Cluster-wide views, like the `gp_stat_*` views of the core:
@@ -230,19 +291,36 @@ Cluster-wide views, like the `gp_stat_*` views of the core:
 | `ext_vacuum_statistics.gp_stats_vacuum_indexes_summary` | the same for indexes |
 | `ext_vacuum_statistics.gp_stats_vacuum_database_summary` | one row per database, summed over all instances |
 
-The reset functions act on the instance they are called on;
+The reset functions without the `gp_` prefix act only on the connected instance;
 `gp_vacuum_statistics_reset()`, `gp_extvac_reset_entry(dboid, relid)` and
-`gp_extvac_reset_db_entry(dboid)` run them on the whole cluster.  A `SET` of
+`gp_extvac_reset_db_entry(dboid)` dispatch the resets from the coordinator to
+all primary segments and also reset the coordinator. A `SET` of
 `vacuum_statistics.enabled` on the coordinator is passed on to the segments.
 
-The statistics are not replicated: after a failover the promoted mirror starts
-with empty statistics, as with the built-in cumulative statistics.
+The counters are local pgstat state and are not replicated through WAL.
+Preloading on a mirror enables collection after promotion; it does not copy
+its primary's accumulated counters. A promoted instance reports its own local
+statistics, so it cannot continue the former primary's counter history. This
+also applies when the standby coordinator is promoted. A compatible clean
+restart can preserve an instance's own counters; crash recovery resets them.
+
+Treat promotion as a new measurement interval for the affected instance, even
+if its `gp_segment_id` is unchanged. Other instances keep their own counters,
+but cluster summaries can decrease when a primary is replaced. Monitoring
+should retain previous samples externally and begin a new baseline after
+failover, without interpreting the change as negative vacuum work.
 
 The test of the cluster-wide views runs against such a cluster:
 
 ```
 make -C contrib/ext_vacuum_statistics installcheck-cluster
+make -C contrib/ext_vacuum_statistics installcheck-cluster-isolation2
 ```
+
+The isolation2 target additionally requires a fault-injector build and the
+`gp_inject_fault` extension installed on every instance. It checks retained
+AO auxiliary entries during distributed DROP, including a suspension at
+COMMIT PREPARED, and their removal after commit.
 
 Reset functions return `void` and require superuser privileges by default.
 An administrator can delegate access with `GRANT EXECUTE`; cluster wrappers
@@ -250,7 +328,8 @@ also require permission to execute the corresponding local reset function.
 A relation reset clears only that relation's counters, leaving its indexes and
 the database aggregate unchanged. A database reset clears its aggregate and
 all its relation entries. The global reset affects all databases on the current
-instance; the `gp_` wrappers apply these operations on every instance.
+instance; the `gp_` wrappers apply these operations on the coordinator and all
+primary segments.
 Existing rows remain visible with zero counters until another vacuum updates
 them. `pg_stat_reset()` also resets the extension's entries for the current
 database. Resetting does not remove the type of a table, index, or database entry.

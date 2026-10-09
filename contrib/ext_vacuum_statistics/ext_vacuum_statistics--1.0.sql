@@ -31,7 +31,7 @@ CREATE SCHEMA IF NOT EXISTS ext_vacuum_statistics;
 COMMENT ON SCHEMA ext_vacuum_statistics IS
   'Extended vacuum statistics (heap, index, database)';
 
--- Reset functions
+-- Local reset functions; use the gp_ wrappers below for a cluster-wide reset.
 CREATE OR REPLACE FUNCTION ext_vacuum_statistics.extvac_reset_entry(
     dboid oid,
     relid oid
@@ -369,12 +369,42 @@ SELECT
   (sum(s.compacted_segments) / s.divisor)::bigint AS compacted_segments,
   (sum(s.tuples_moved) / s.divisor)::bigint AS tuples_moved,
   (sum(s.dead_pages) / s.divisor)::bigint AS dead_pages,
-  (sum(s.freeze_age_vacuum_count) / s.divisor)::bigint AS freeze_age_vacuum_count
+  (sum(s.freeze_age_vacuum_count) / s.divisor)::bigint AS freeze_age_vacuum_count,
+  (sum(s.awaiting_drop_segments) / s.divisor)::bigint AS awaiting_drop_segments,
+  (sum(s.ao_pre_cleanup_blks_read) / s.divisor)::bigint AS ao_pre_cleanup_blks_read,
+  (sum(s.ao_pre_cleanup_blks_hit) / s.divisor)::bigint AS ao_pre_cleanup_blks_hit,
+  (sum(s.ao_pre_cleanup_blks_dirtied) / s.divisor)::bigint AS ao_pre_cleanup_blks_dirtied,
+  (sum(s.ao_pre_cleanup_blks_written) / s.divisor)::bigint AS ao_pre_cleanup_blks_written,
+  (sum(s.ao_pre_cleanup_wal_records) / s.divisor)::bigint AS ao_pre_cleanup_wal_records,
+  (sum(s.ao_pre_cleanup_wal_fpi) / s.divisor)::bigint AS ao_pre_cleanup_wal_fpi,
+  (sum(s.ao_pre_cleanup_wal_bytes) / s.divisor) AS ao_pre_cleanup_wal_bytes,
+  (sum(s.ao_pre_cleanup_blk_read_time) / s.divisor) AS ao_pre_cleanup_blk_read_time,
+  (sum(s.ao_pre_cleanup_blk_write_time) / s.divisor) AS ao_pre_cleanup_blk_write_time,
+  (sum(s.ao_compaction_blks_read) / s.divisor)::bigint AS ao_compaction_blks_read,
+  (sum(s.ao_compaction_blks_hit) / s.divisor)::bigint AS ao_compaction_blks_hit,
+  (sum(s.ao_compaction_blks_dirtied) / s.divisor)::bigint AS ao_compaction_blks_dirtied,
+  (sum(s.ao_compaction_blks_written) / s.divisor)::bigint AS ao_compaction_blks_written,
+  (sum(s.ao_compaction_wal_records) / s.divisor)::bigint AS ao_compaction_wal_records,
+  (sum(s.ao_compaction_wal_fpi) / s.divisor)::bigint AS ao_compaction_wal_fpi,
+  (sum(s.ao_compaction_wal_bytes) / s.divisor) AS ao_compaction_wal_bytes,
+  (sum(s.ao_compaction_blk_read_time) / s.divisor) AS ao_compaction_blk_read_time,
+  (sum(s.ao_compaction_blk_write_time) / s.divisor) AS ao_compaction_blk_write_time,
+  (sum(s.ao_post_cleanup_blks_read) / s.divisor)::bigint AS ao_post_cleanup_blks_read,
+  (sum(s.ao_post_cleanup_blks_hit) / s.divisor)::bigint AS ao_post_cleanup_blks_hit,
+  (sum(s.ao_post_cleanup_blks_dirtied) / s.divisor)::bigint AS ao_post_cleanup_blks_dirtied,
+  (sum(s.ao_post_cleanup_blks_written) / s.divisor)::bigint AS ao_post_cleanup_blks_written,
+  (sum(s.ao_post_cleanup_wal_records) / s.divisor)::bigint AS ao_post_cleanup_wal_records,
+  (sum(s.ao_post_cleanup_wal_fpi) / s.divisor)::bigint AS ao_post_cleanup_wal_fpi,
+  (sum(s.ao_post_cleanup_wal_bytes) / s.divisor) AS ao_post_cleanup_wal_bytes,
+  (sum(s.ao_post_cleanup_blk_read_time) / s.divisor) AS ao_post_cleanup_blk_read_time,
+  (sum(s.ao_post_cleanup_blk_write_time) / s.divisor) AS ao_post_cleanup_blk_write_time
 FROM (
   SELECT v.*,
          CASE WHEN d.policytype = 'r' THEN d.numsegments ELSE 1 END AS divisor
   FROM gp_dist_random('ext_vacuum_statistics.pg_stats_vacuum_tables') v
-  LEFT JOIN gp_distribution_policy d ON d.localoid = v.relid
+  LEFT JOIN (SELECT relid, unnest(ARRAY[segrelid, blkdirrelid, visimaprelid]) AS auxrelid
+               FROM pg_appendonly) a ON a.auxrelid = v.relid
+  LEFT JOIN gp_distribution_policy d ON d.localoid = coalesce(a.relid, v.relid)
   WHERE v.relid >= 16384
 ) s
 GROUP BY s.relid, s.schema, s.relname, s.dbname, s.divisor
@@ -408,7 +438,35 @@ SELECT
   compacted_segments,
   tuples_moved,
   dead_pages,
-  freeze_age_vacuum_count
+  freeze_age_vacuum_count,
+  awaiting_drop_segments,
+  ao_pre_cleanup_blks_read,
+  ao_pre_cleanup_blks_hit,
+  ao_pre_cleanup_blks_dirtied,
+  ao_pre_cleanup_blks_written,
+  ao_pre_cleanup_wal_records,
+  ao_pre_cleanup_wal_fpi,
+  ao_pre_cleanup_wal_bytes,
+  ao_pre_cleanup_blk_read_time,
+  ao_pre_cleanup_blk_write_time,
+  ao_compaction_blks_read,
+  ao_compaction_blks_hit,
+  ao_compaction_blks_dirtied,
+  ao_compaction_blks_written,
+  ao_compaction_wal_records,
+  ao_compaction_wal_fpi,
+  ao_compaction_wal_bytes,
+  ao_compaction_blk_read_time,
+  ao_compaction_blk_write_time,
+  ao_post_cleanup_blks_read,
+  ao_post_cleanup_blks_hit,
+  ao_post_cleanup_blks_dirtied,
+  ao_post_cleanup_blks_written,
+  ao_post_cleanup_wal_records,
+  ao_post_cleanup_wal_fpi,
+  ao_post_cleanup_wal_bytes,
+  ao_post_cleanup_blk_read_time,
+  ao_post_cleanup_blk_write_time
 FROM ext_vacuum_statistics.pg_stats_vacuum_tables
 WHERE relid < 16384;
 
@@ -440,7 +498,9 @@ FROM (
          CASE WHEN d.policytype = 'r' THEN d.numsegments ELSE 1 END AS divisor
   FROM gp_dist_random('ext_vacuum_statistics.pg_stats_vacuum_indexes') v
   JOIN pg_index i ON i.indexrelid = v.indexrelid
-  LEFT JOIN gp_distribution_policy d ON d.localoid = i.indrelid
+  LEFT JOIN (SELECT relid, unnest(ARRAY[segrelid, blkdirrelid, visimaprelid]) AS auxrelid
+               FROM pg_appendonly) a ON a.auxrelid = i.indrelid
+  LEFT JOIN gp_distribution_policy d ON d.localoid = coalesce(a.relid, i.indrelid)
   WHERE v.indexrelid >= 16384
 ) s
 GROUP BY s.indexrelid, s.schema, s.indexrelname, s.dbname, s.divisor
@@ -494,7 +554,8 @@ COMMENT ON VIEW ext_vacuum_statistics.gp_stats_vacuum_database_summary IS
 --
 -- Cloudberry: resetting on the whole cluster.  The reset functions above act
 -- on the instance they are called on; these run them on the coordinator and
--- on every segment.
+-- on every primary segment. Call these wrappers from a normal coordinator
+-- connection; use the local functions in utility mode.
 --
 CREATE FUNCTION ext_vacuum_statistics.gp_vacuum_statistics_reset()
 RETURNS void
@@ -516,6 +577,13 @@ AS $$
   SELECT ext_vacuum_statistics.extvac_reset_db_entry(dboid) FROM gp_dist_random('gp_id');
   SELECT ext_vacuum_statistics.extvac_reset_db_entry(dboid);
 $$ LANGUAGE sql STRICT VOLATILE;
+
+COMMENT ON FUNCTION ext_vacuum_statistics.gp_extvac_reset_entry(oid, oid) IS
+  'Reset vacuum statistics for one table or index on the coordinator and all primary segments; call on the coordinator';
+COMMENT ON FUNCTION ext_vacuum_statistics.gp_extvac_reset_db_entry(oid) IS
+  'Reset vacuum statistics for a database and its relations on the coordinator and all primary segments; call on the coordinator';
+COMMENT ON FUNCTION ext_vacuum_statistics.gp_vacuum_statistics_reset() IS
+  'Reset vacuum statistics for all databases on the coordinator and all primary segments; call on the coordinator';
 
 REVOKE EXECUTE ON FUNCTION ext_vacuum_statistics.gp_extvac_reset_entry(oid, oid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ext_vacuum_statistics.gp_extvac_reset_db_entry(oid) FROM PUBLIC;
