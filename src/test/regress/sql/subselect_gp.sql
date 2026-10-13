@@ -1515,3 +1515,80 @@ reset optimizer;
 drop table outer_foo;
 drop table inner_bar;
 drop table t;
+
+-- Preserve rows when a scalar-subquery filter accepts NULL.
+create table empty_agg_outer (a int, b int, d int) distributed by (a);
+create table empty_agg_inner (a int, b int) distributed by (a);
+insert into empty_agg_outer values (3,1,1), (1,9,5), (0,2,7), (5,5,1), (2,4,9);
+insert into empty_agg_inner values (1,10), (2,20), (1,30);
+analyze empty_agg_outer;
+analyze empty_agg_inner;
+set optimizer to off;
+-- a filter that can be true for a NULL subquery keeps the rows the subquery
+-- returns no row for
+select a, d from empty_agg_outer o
+  where coalesce((select sum(i.b) from empty_agg_inner i where i.a = o.d), 0) = 0
+  order by 1, 2;
+select a, d from empty_agg_outer o
+  where (select i.b from empty_agg_inner i where i.a = o.d and i.b = 10) is null
+  order by 1, 2;
+set optimizer to on;
+-- a filter that can be true for a NULL subquery keeps the rows the subquery
+-- returns no row for
+select a, d from empty_agg_outer o
+  where coalesce((select sum(i.b) from empty_agg_inner i where i.a = o.d), 0) = 0
+  order by 1, 2;
+select a, d from empty_agg_outer o
+  where (select i.b from empty_agg_inner i where i.a = o.d and i.b = 10) is null
+  order by 1, 2;
+-- NULL rejection must hold for each subquery individually, not just when
+-- both are NULL. Each matching outer row has input in only one subquery.
+set optimizer to off;
+select a from empty_agg_outer o
+  where coalesce((select sum(i.b) from empty_agg_inner i
+                   where i.a = o.a and i.b = 10),
+                 (select sum(i.b) from empty_agg_inner i
+                   where i.a = o.a and i.b = 20)) > 0 order by 1;
+set optimizer to on;
+explain (costs off) select a from empty_agg_outer o
+  where coalesce((select sum(i.b) from empty_agg_inner i
+                   where i.a = o.a and i.b = 10),
+                 (select sum(i.b) from empty_agg_inner i
+                   where i.a = o.a and i.b = 20)) > 0;
+select a from empty_agg_outer o
+  where coalesce((select sum(i.b) from empty_agg_inner i
+                   where i.a = o.a and i.b = 10),
+                 (select sum(i.b) from empty_agg_inner i
+                   where i.a = o.a and i.b = 20)) > 0 order by 1;
+
+-- Array index lists and CASE arms are structural nodes without a result
+-- type. NULL-rejection checks must not call MdidType() on those nodes.
+set optimizer to off;
+select a from empty_agg_outer o
+  where (array[30,20])[(select max(i.a) from empty_agg_inner i where i.a = o.a)]
+      = (select max(i.b) from empty_agg_inner i where i.a = o.a) order by 1;
+select a from empty_agg_outer o
+  where case o.a
+          when 1 then (select max(i.b) from empty_agg_inner i where i.a = o.a)
+          else 20
+        end = (select max(i.b) from empty_agg_inner i where i.a = o.a) order by 1;
+set optimizer to on;
+explain (costs off) select a from empty_agg_outer o
+  where (array[30,20])[(select max(i.a) from empty_agg_inner i where i.a = o.a)]
+      = (select max(i.b) from empty_agg_inner i where i.a = o.a);
+select a from empty_agg_outer o
+  where (array[30,20])[(select max(i.a) from empty_agg_inner i where i.a = o.a)]
+      = (select max(i.b) from empty_agg_inner i where i.a = o.a) order by 1;
+explain (costs off) select a from empty_agg_outer o
+  where case o.a
+          when 1 then (select max(i.b) from empty_agg_inner i where i.a = o.a)
+          else 20
+        end = (select max(i.b) from empty_agg_inner i where i.a = o.a);
+select a from empty_agg_outer o
+  where case o.a
+          when 1 then (select max(i.b) from empty_agg_inner i where i.a = o.a)
+          else 20
+        end = (select max(i.b) from empty_agg_inner i where i.a = o.a) order by 1;
+
+reset optimizer;
+drop table empty_agg_outer, empty_agg_inner;
