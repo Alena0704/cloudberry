@@ -24,6 +24,7 @@ This directory contains GitHub Actions workflows for Apache Cloudberry CI/CD.
 ## Table of Contents
 
 - [Available Workflows](#available-workflows)
+- [Re-running Failed PR CI](#re-running-failed-pr-ci)
 - [Manual Workflow Triggers](#manual-workflow-triggers)
 - [Artifact Reuse for Faster Testing](#artifact-reuse-for-faster-testing)
 - [Running Workflows in Forked Repositories](#running-workflows-in-forked-repositories)
@@ -40,6 +41,33 @@ This directory contains GitHub Actions workflows for Apache Cloudberry CI/CD.
 | `sonarqube.yml` | Code quality analysis with SonarQube | Push to main |
 | `docker-cbdb-build-containers.yml` | Build Docker images for CI | Manual |
 | `docker-cbdb-test-containers.yml` | Build test Docker images | Manual |
+
+## Re-running Failed PR CI
+
+Repository collaborators (including access through teams), and users with
+write, maintain, or admin access can post a new PR comment containing exactly:
+
+```text
+/retest-failed
+```
+
+PR authorship, previous contributions, or public read access alone do not
+grant permission to use this command. Membership and permissions are checked
+against the repository where CI runs, not the contributor's fork.
+
+This retries failed jobs in the latest Rocky Linux, Debian, Debug, and RAT
+runs for the current PR commit. Successful, running, cancelled, and
+approval-pending runs are not restarted. Results and run links are available
+in the **Re-run failed PR CI** workflow summary. Expired build artifacts may
+require a maintainer to start a full rebuild.
+
+The command becomes available after `retest-failed.yml` and its handler are
+merged into the default branch. The handler executes only default-branch
+code and never checks out or executes PR code with its write token.
+
+Editing the PR title or description does not trigger these CI workflows.
+Changes to skip markers or the target branch alone also do not trigger them;
+push a new commit when a fresh PR run is needed.
 
 ## Manual Workflow Triggers
 

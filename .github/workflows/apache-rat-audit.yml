@@ -35,7 +35,8 @@ on:
     branches: [main, REL_2_STABLE]
   pull_request:
     branches: [main, REL_2_STABLE]
-    types: [opened, synchronize, reopened, edited]
+    # PR title/body edits do not require rebuilding or retesting.
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 permissions:
