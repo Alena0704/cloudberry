@@ -118,27 +118,24 @@ partition by range (y) ( start (0) end (4) every (1))
 insert into csq_t1 select * from csq_t1_base;
 insert into csq_t2 select * from csq_t2_base;
 explain select * from csq_t1 where csq_t1.x >ALL (select csq_t2.x from csq_t2 where csq_t2.y=csq_t1.y) order by 1;
-                                                                                                                                                                              QUERY PLAN                                                                                                                                                                               
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                            QUERY PLAN                                            
+--------------------------------------------------------------------------------------------------
  Result  (cost=0.00..1293.00 rows=1 width=8)
    Filter: (SubPlan 1)
    ->  Sort  (cost=0.00..431.00 rows=1 width=8)
          Sort Key: csq_t1.x
          ->  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..431.00 rows=1 width=8)
                ->  Dynamic Seq Scan on csq_t1  (cost=0.00..431.00 rows=1 width=8)
-                     Number of partitions to scan: 4 
+                     Number of partitions to scan: 4 (out of 4)
    SubPlan 1
-     ->  Result  (cost=0.00..431.00 rows=1 width=1)
-           Filter: ((CASE WHEN (sum((CASE WHEN (csq_t1.x <= csq_t2.x) THEN 1 ELSE 0 END)) IS NULL) THEN true WHEN (sum((CASE WHEN (csq_t2.x IS NULL) THEN 1 ELSE 0 END)) > '0'::bigint) THEN NULL::boolean WHEN (csq_t1.x IS NULL) THEN NULL::boolean WHEN (sum((CASE WHEN (csq_t1.x <= csq_t2.x) THEN 1 ELSE 0 END)) = '0'::bigint) THEN true ELSE false END) = true)
-           ->  Aggregate  (cost=0.00..431.00 rows=1 width=16)
-                 ->  Result  (cost=0.00..431.00 rows=1 width=4)
-                       Filter: (csq_t2.y = csq_t1.y)
-                       ->  Materialize  (cost=0.00..431.00 rows=1 width=8)
-                             ->  Gather Motion 3:1  (slice2; segments: 3)  (cost=0.00..431.00 rows=1 width=8)
-                                   ->  Dynamic Seq Scan on csq_t2  (cost=0.00..431.00 rows=1 width=8)
-                                         Number of partitions to scan: 4 
- Optimizer: Pivotal Optimizer (GPORCA)
-(18 rows)
+     ->  Result  (cost=0.00..431.00 rows=1 width=4)
+           Filter: (csq_t2.y = csq_t1.y)
+           ->  Materialize  (cost=0.00..431.00 rows=1 width=8)
+                 ->  Gather Motion 3:1  (slice2; segments: 3)  (cost=0.00..431.00 rows=1 width=8)
+                       ->  Dynamic Seq Scan on csq_t2  (cost=0.00..431.00 rows=1 width=8)
+                             Number of partitions to scan: 4 (out of 4)
+ Optimizer: GPORCA
+(15 rows)
 
 select * from csq_t1 where csq_t1.x >ALL (select csq_t2.x from csq_t2 where csq_t2.y=csq_t1.y) order by 1; -- expected (4,2)
  x | y 
@@ -884,24 +881,22 @@ select * from csq_pullup t0 where 1= (select count(*) from csq_pullup t1 where t
 
 -- subquery contains a HAVING clause
 explain select * from csq_pullup t0 where 1= (select count(*) from csq_pullup t1 where t0.t=t1.t HAVING count(*) < 10);
-                                                    QUERY PLAN                                                     
--------------------------------------------------------------------------------------------------------------------
+                                                                                  QUERY PLAN                                                                                  
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Gather Motion 3:1  (slice1; segments: 3)  (cost=0.00..862.00 rows=1 width=17)
    ->  Result  (cost=0.00..862.00 rows=1 width=17)
-         Filter: (1 = COALESCE((count(*)), '0'::bigint))
-         ->  Hash Left Join  (cost=0.00..862.00 rows=1 width=25)
+         Filter: (1 = CASE WHEN (true) THEN CASE WHEN ((count(*)) < 10) THEN (count(*)) ELSE NULL::bigint END WHEN ('0'::bigint < 10) THEN '0'::bigint ELSE NULL::bigint END)
+         ->  Hash Left Join  (cost=0.00..862.00 rows=1 width=34)
                Hash Cond: (t0.t = t1.t)
                ->  Seq Scan on csq_pullup t0  (cost=0.00..431.00 rows=1 width=17)
-               ->  Hash  (cost=431.00..431.00 rows=1 width=12)
-                     ->  Result  (cost=0.00..431.00 rows=1 width=12)
-                           Filter: ((count(*)) < 10)
-                           ->  GroupAggregate  (cost=0.00..431.00 rows=1 width=20)
-                                 Group Key: t1.t
-                                 ->  Sort  (cost=0.00..431.00 rows=1 width=4)
-                                       Sort Key: t1.t
-                                       ->  Seq Scan on csq_pullup t1  (cost=0.00..431.00 rows=1 width=4)
- Optimizer: Pivotal Optimizer (GPORCA) version 3.83.0
-(15 rows)
+               ->  Hash  (cost=431.00..431.00 rows=1 width=21)
+                     ->  GroupAggregate  (cost=0.00..431.00 rows=1 width=20)
+                           Group Key: t1.t
+                           ->  Sort  (cost=0.00..431.00 rows=1 width=4)
+                                 Sort Key: t1.t
+                                 ->  Seq Scan on csq_pullup t1  (cost=0.00..431.00 rows=1 width=4)
+ Optimizer: GPORCA
+(13 rows)
 
 select * from csq_pullup t0 where 1= (select count(*) from csq_pullup t1 where t0.t=t1.t HAVING count(*) < 10);
   t  | n | i |  v  
