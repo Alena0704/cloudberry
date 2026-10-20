@@ -16,6 +16,7 @@
 
 #include "access/htup_details.h"
 #include "access/skey.h"
+#include "catalog/pg_aggregate.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
@@ -567,6 +568,47 @@ safe_to_convert_EXPR(SubLink *sublink, ConvertSubqueryToJoinContext *ctx1)
 	if (list_length(subselect->targetList) != 1)
 		return false;
 
+	/*
+	 * The INNER join loses outer rows with no matching input.  That is safe
+	 * only if the scalar aggregate returns NULL on empty input and the
+	 * comparison is strict (checked by convert_EXPR_to_join).  Do not try to
+	 * evaluate a hypothetical empty-input expression during planning: even
+	 * immutable functions can fail on values the query never encounters.
+	 *
+	 * Be conservative about expressions around aggregates and ordered-set
+	 * aggregates, whose direct arguments can be evaluated on empty input.
+	 * Leave these cases, including COUNT and COALESCE(SUM(...), 0), as SubPlans.
+	 */
+	{
+		TargetEntry *tle = linitial_node(TargetEntry, subselect->targetList);
+		Aggref	   *aggref;
+		HeapTuple	aggTuple;
+		Form_pg_aggregate aggform;
+		bool		initValueIsNull;
+		bool		emptyInputIsNull;
+
+		if (subselect->hasWindowFuncs || !IsA(tle->expr, Aggref) ||
+			contain_vars_of_level_or_above((Node *) subselect->targetList, 1))
+			return false;
+
+		aggref = (Aggref *) tle->expr;
+		if (aggref->agglevelsup != 0 || aggref->aggkind != AGGKIND_NORMAL)
+			return false;
+
+		aggTuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggref->aggfnoid));
+		if (!HeapTupleIsValid(aggTuple))
+			elog(ERROR, "cache lookup failed for aggregate %u", aggref->aggfnoid);
+		aggform = (Form_pg_aggregate) GETSTRUCT(aggTuple);
+		(void) SysCacheGetAttr(AGGFNOID, aggTuple,
+							  Anum_pg_aggregate_agginitval, &initValueIsNull);
+		emptyInputIsNull = initValueIsNull &&
+			(!OidIsValid(aggform->aggfinalfn) || func_strict(aggform->aggfinalfn));
+		ReleaseSysCache(aggTuple);
+
+		if (!emptyInputIsNull)
+			return false;
+	}
+
 
 	/**
 	 * Walk the quals of the subquery to do a more fine grained check as to whether this subquery
@@ -601,6 +643,10 @@ convert_EXPR_to_join(PlannerInfo *root, OpExpr *opexp)
 	ConvertSubqueryToJoinContext ctx1;
 
 	InitConvertSubqueryToJoinContext(&ctx1);
+
+	/* A nonstrict comparison may accept the NULL from empty input. */
+	if (!op_strict(opexp->opno))
+		return NULL;
 
 	if (safe_to_convert_EXPR(sublink, &ctx1))
 	{

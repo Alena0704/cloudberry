@@ -1515,3 +1515,58 @@ reset optimizer;
 drop table outer_foo;
 drop table inner_bar;
 drop table t;
+
+-- INNER-join pull-up must not discard a scalar aggregate's empty-input row.
+set optimizer to off;
+create table guard_agg_outer (a int) distributed by (a);
+create table guard_agg_inner (a int, b int) distributed by (a);
+-- Neither the final function nor direct arguments may run without outer rows.
+select a from guard_agg_outer o where 0 <
+  (select percentile_cont(2) within group (order by i.b)
+   from guard_agg_inner i where i.a = o.a);
+create function guard_rank_arg() returns int language plpgsql volatile as $$
+begin
+  raise exception 'unexpected direct argument evaluation';
+end;
+$$;
+select a from guard_agg_outer o where 0 <
+  (select rank(guard_rank_arg()) within group (order by i.a)
+   from guard_agg_inner i where i.a = o.a);
+insert into guard_agg_outer values (1), (2), (3);
+insert into guard_agg_inner values (1, 10), (2, null);
+select a from guard_agg_outer o where 0 =
+  (select count(*) from guard_agg_inner i where i.a = o.a) order by 1;
+select a from guard_agg_outer o where 1 =
+  (select count(*) + 1 from guard_agg_inner i where i.a = o.a) order by 1;
+select a from guard_agg_outer o where 0 =
+  (select coalesce(sum(i.b), 0) from guard_agg_inner i where i.a = o.a) order by 1;
+create aggregate guard_sum_from_five(int)
+  (sfunc = int4pl, stype = int4, initcond = '5');
+select a from guard_agg_outer o where 5 =
+  (select guard_sum_from_five(i.b) from guard_agg_inner i where i.a = o.a) order by 1;
+select a from guard_agg_outer o where 1 =
+  (select rank(15) within group (order by i.b)
+   from guard_agg_inner i where i.a = o.a) order by 1;
+-- A NULL-on-empty aggregate alone is insufficient with a nonstrict operator.
+create function guard_null_cmp(bigint, bigint) returns boolean
+  language sql immutable as 'select $2 is null';
+create operator === (leftarg = bigint, rightarg = bigint,
+                     function = guard_null_cmp);
+select a from guard_agg_outer o where 1::bigint ===
+  (select sum(i.b) from guard_agg_inner i where i.a = o.a) order by 1;
+drop operator === (bigint, bigint);
+drop function guard_null_cmp(bigint, bigint);
+-- A custom strict comparison must not be evaluated on hypothetical COUNT=0.
+create function guard_agg_cmp(bigint, bigint) returns boolean
+  language sql immutable strict as 'select $1 < 10 / $2';
+create operator === (leftarg = bigint, rightarg = bigint,
+                     function = guard_agg_cmp);
+delete from guard_agg_outer where a <> 1;
+select a from guard_agg_outer o where 1::bigint ===
+  (select count(*) from guard_agg_inner i where i.a = o.a);
+drop operator === (bigint, bigint);
+drop function guard_agg_cmp(bigint, bigint);
+drop function guard_rank_arg();
+drop aggregate guard_sum_from_five(int);
+drop table guard_agg_outer, guard_agg_inner;
+reset optimizer;
