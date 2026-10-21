@@ -4015,3 +4015,219 @@ reset optimizer;
 drop table outer_foo;
 drop table inner_bar;
 drop table t;
+
+-- Preserve rows when a scalar-subquery filter accepts NULL.
+create table empty_agg_outer (a int, b int, d int) distributed by (a);
+create table empty_agg_inner (a int, b int) distributed by (a);
+insert into empty_agg_outer values (3,1,1), (1,9,5), (0,2,7), (5,5,1), (2,4,9);
+insert into empty_agg_inner values (1,10), (2,20), (1,30);
+analyze empty_agg_outer;
+analyze empty_agg_inner;
+set optimizer to off;
+-- a filter that can be true for a NULL subquery keeps the rows the subquery
+-- returns no row for
+select a, d from empty_agg_outer o
+  where coalesce((select sum(i.b) from empty_agg_inner i where i.a = o.d), 0) = 0
+  order by 1, 2;
+ a | d 
+---+---
+ 0 | 7
+ 1 | 5
+ 2 | 9
+(3 rows)
+
+select a, d from empty_agg_outer o
+  where (select i.b from empty_agg_inner i where i.a = o.d and i.b = 10) is null
+  order by 1, 2;
+ a | d 
+---+---
+ 0 | 7
+ 1 | 5
+ 2 | 9
+(3 rows)
+
+set optimizer to on;
+-- a filter that can be true for a NULL subquery keeps the rows the subquery
+-- returns no row for
+select a, d from empty_agg_outer o
+  where coalesce((select sum(i.b) from empty_agg_inner i where i.a = o.d), 0) = 0
+  order by 1, 2;
+ a | d 
+---+---
+ 0 | 7
+ 1 | 5
+ 2 | 9
+(3 rows)
+
+select a, d from empty_agg_outer o
+  where (select i.b from empty_agg_inner i where i.a = o.d and i.b = 10) is null
+  order by 1, 2;
+ a | d 
+---+---
+ 0 | 7
+ 1 | 5
+ 2 | 9
+(3 rows)
+
+-- NULL rejection must hold for each subquery individually, not just when
+-- both are NULL. Each matching outer row has input in only one subquery.
+set optimizer to off;
+select a from empty_agg_outer o
+  where coalesce((select sum(i.b) from empty_agg_inner i
+                   where i.a = o.a and i.b = 10),
+                 (select sum(i.b) from empty_agg_inner i
+                   where i.a = o.a and i.b = 20)) > 0 order by 1;
+ a 
+---
+ 1
+ 2
+(2 rows)
+
+set optimizer to on;
+explain (costs off) select a from empty_agg_outer o
+  where coalesce((select sum(i.b) from empty_agg_inner i
+                   where i.a = o.a and i.b = 10),
+                 (select sum(i.b) from empty_agg_inner i
+                   where i.a = o.a and i.b = 20)) > 0;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Result
+         Filter: (COALESCE((sum(i.b)), (sum(i_1.b))) > 0)
+         ->  Hash Left Join
+               Hash Cond: (o.a = i_1.a)
+               ->  Hash Left Join
+                     Hash Cond: (o.a = i.a)
+                     ->  Seq Scan on empty_agg_outer o
+                     ->  Hash
+                           ->  GroupAggregate
+                                 Group Key: i.a
+                                 ->  Sort
+                                       Sort Key: i.a
+                                       ->  Seq Scan on empty_agg_inner i
+                                             Filter: (b = 10)
+               ->  Hash
+                     ->  GroupAggregate
+                           Group Key: i_1.a
+                           ->  Sort
+                                 Sort Key: i_1.a
+                                 ->  Seq Scan on empty_agg_inner i_1
+                                       Filter: (b = 20)
+ Optimizer: GPORCA
+(23 rows)
+
+select a from empty_agg_outer o
+  where coalesce((select sum(i.b) from empty_agg_inner i
+                   where i.a = o.a and i.b = 10),
+                 (select sum(i.b) from empty_agg_inner i
+                   where i.a = o.a and i.b = 20)) > 0 order by 1;
+ a 
+---
+ 1
+ 2
+(2 rows)
+
+-- Array index lists and CASE arms are structural nodes without a result
+-- type. NULL-rejection checks must not call MdidType() on those nodes.
+set optimizer to off;
+select a from empty_agg_outer o
+  where (array[30,20])[(select max(i.a) from empty_agg_inner i where i.a = o.a)]
+      = (select max(i.b) from empty_agg_inner i where i.a = o.a) order by 1;
+ a 
+---
+ 1
+ 2
+(2 rows)
+
+select a from empty_agg_outer o
+  where case o.a
+          when 1 then (select max(i.b) from empty_agg_inner i where i.a = o.a)
+          else 20
+        end = (select max(i.b) from empty_agg_inner i where i.a = o.a) order by 1;
+ a 
+---
+ 1
+ 2
+(2 rows)
+
+set optimizer to on;
+explain (costs off) select a from empty_agg_outer o
+  where (array[30,20])[(select max(i.a) from empty_agg_inner i where i.a = o.a)]
+      = (select max(i.b) from empty_agg_inner i where i.a = o.a);
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Result
+         Filter: (('{30,20}'::integer[])[(max(i.a))] = (max(i_1.b)))
+         ->  Hash Left Join
+               Hash Cond: (o.a = i_1.a)
+               ->  Hash Left Join
+                     Hash Cond: (o.a = i.a)
+                     ->  Seq Scan on empty_agg_outer o
+                     ->  Hash
+                           ->  GroupAggregate
+                                 Group Key: i.a
+                                 ->  Sort
+                                       Sort Key: i.a
+                                       ->  Seq Scan on empty_agg_inner i
+               ->  Hash
+                     ->  GroupAggregate
+                           Group Key: i_1.a
+                           ->  Sort
+                                 Sort Key: i_1.a
+                                 ->  Seq Scan on empty_agg_inner i_1
+ Optimizer: GPORCA
+(21 rows)
+
+select a from empty_agg_outer o
+  where (array[30,20])[(select max(i.a) from empty_agg_inner i where i.a = o.a)]
+      = (select max(i.b) from empty_agg_inner i where i.a = o.a) order by 1;
+ a 
+---
+ 1
+ 2
+(2 rows)
+
+explain (costs off) select a from empty_agg_outer o
+  where case o.a
+          when 1 then (select max(i.b) from empty_agg_inner i where i.a = o.a)
+          else 20
+        end = (select max(i.b) from empty_agg_inner i where i.a = o.a);
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Gather Motion 3:1  (slice1; segments: 3)
+   ->  Result
+         Filter: (CASE o.a WHEN 1 THEN (max(i.b)) ELSE 20 END = (max(i_1.b)))
+         ->  Hash Left Join
+               Hash Cond: (o.a = i_1.a)
+               ->  Hash Left Join
+                     Hash Cond: (o.a = i.a)
+                     ->  Seq Scan on empty_agg_outer o
+                     ->  Hash
+                           ->  GroupAggregate
+                                 Group Key: i.a
+                                 ->  Sort
+                                       Sort Key: i.a
+                                       ->  Seq Scan on empty_agg_inner i
+               ->  Hash
+                     ->  GroupAggregate
+                           Group Key: i_1.a
+                           ->  Sort
+                                 Sort Key: i_1.a
+                                 ->  Seq Scan on empty_agg_inner i_1
+ Optimizer: GPORCA
+(21 rows)
+
+select a from empty_agg_outer o
+  where case o.a
+          when 1 then (select max(i.b) from empty_agg_inner i where i.a = o.a)
+          else 20
+        end = (select max(i.b) from empty_agg_inner i where i.a = o.a) order by 1;
+ a 
+---
+ 1
+ 2
+(2 rows)
+
+reset optimizer;
+drop table empty_agg_outer, empty_agg_inner;
