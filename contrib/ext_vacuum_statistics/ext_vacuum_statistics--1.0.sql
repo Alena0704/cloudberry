@@ -78,10 +78,61 @@ CREATE OR REPLACE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_tables(
     OUT blk_read_time double precision,
     OUT blk_write_time double precision,
     OUT rel_blks_read bigint,
-    OUT rel_blks_hit bigint
+    OUT rel_blks_hit bigint,
+    OUT awaiting_drop_segments bigint
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stats_get_vacuum_tables'
+LANGUAGE C STRICT STABLE;
+
+-- Internal C function to fetch AO resource totals and phases from one statistics snapshot.
+-- The AO view below selects parent AO/AOCS relations through pg_appendonly.
+CREATE FUNCTION ext_vacuum_statistics.pg_stats_get_vacuum_ao_tables(
+    IN dboid oid,
+    IN reloid oid,
+    OUT relid oid,
+    OUT total_blks_read bigint,
+    OUT total_blks_hit bigint,
+    OUT total_blks_dirtied bigint,
+    OUT total_blks_written bigint,
+    OUT wal_records bigint,
+    OUT wal_fpi bigint,
+    OUT wal_bytes numeric,
+    OUT blk_read_time double precision,
+    OUT blk_write_time double precision,
+    OUT rel_blks_read bigint,
+    OUT rel_blks_hit bigint,
+    OUT awaiting_drop_segments bigint,
+    OUT ao_pre_cleanup_blks_read bigint,
+    OUT ao_pre_cleanup_blks_hit bigint,
+    OUT ao_pre_cleanup_blks_dirtied bigint,
+    OUT ao_pre_cleanup_blks_written bigint,
+    OUT ao_pre_cleanup_wal_records bigint,
+    OUT ao_pre_cleanup_wal_fpi bigint,
+    OUT ao_pre_cleanup_wal_bytes numeric,
+    OUT ao_pre_cleanup_blk_read_time double precision,
+    OUT ao_pre_cleanup_blk_write_time double precision,
+    OUT ao_compaction_blks_read bigint,
+    OUT ao_compaction_blks_hit bigint,
+    OUT ao_compaction_blks_dirtied bigint,
+    OUT ao_compaction_blks_written bigint,
+    OUT ao_compaction_wal_records bigint,
+    OUT ao_compaction_wal_fpi bigint,
+    OUT ao_compaction_wal_bytes numeric,
+    OUT ao_compaction_blk_read_time double precision,
+    OUT ao_compaction_blk_write_time double precision,
+    OUT ao_post_cleanup_blks_read bigint,
+    OUT ao_post_cleanup_blks_hit bigint,
+    OUT ao_post_cleanup_blks_dirtied bigint,
+    OUT ao_post_cleanup_blks_written bigint,
+    OUT ao_post_cleanup_wal_records bigint,
+    OUT ao_post_cleanup_wal_fpi bigint,
+    OUT ao_post_cleanup_wal_bytes numeric,
+    OUT ao_post_cleanup_blk_read_time double precision,
+    OUT ao_post_cleanup_blk_write_time double precision
+)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'pg_stats_get_vacuum_ao_tables'
 LANGUAGE C STRICT STABLE;
 
 -- Internal C function to fetch index VACUUM resources
@@ -123,7 +174,8 @@ RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'pg_stats_get_vacuum_database'
 LANGUAGE C STRICT STABLE;
 
--- View: vacuum statistics per table (heap)
+-- Work counters come from native pgstat, even without an extension resource entry.
+-- View: vacuum statistics per table (heap and append-optimized)
 CREATE VIEW ext_vacuum_statistics.pg_stats_vacuum_tables AS
 SELECT
   rel.oid AS relid,
@@ -143,7 +195,19 @@ SELECT
   COALESCE(stats.rel_blks_hit, 0) AS rel_blks_hit,
   work.tuples_deleted,
   work.pages_scanned,
-  work.pages_removed
+  work.pages_removed,
+  work.tuples_frozen,
+  work.recently_dead_tuples,
+  work.missed_dead_pages,
+  work.missed_dead_tuples,
+  pg_catalog.pg_stat_get_pages_frozen(rel.oid) AS pages_frozen,
+  pg_catalog.pg_stat_get_pages_all_visible(rel.oid) AS pages_all_visible,
+  work.total_file_segs,
+  work.compacted_segments,
+  work.tuples_moved,
+  work.dead_pages,
+  work.freeze_age_vacuum_count,
+  COALESCE(stats.awaiting_drop_segments, 0) AS awaiting_drop_segments
 FROM pg_class rel
 JOIN pg_namespace ns ON ns.oid = rel.relnamespace
 JOIN pg_database db ON db.datname = current_database()
@@ -152,7 +216,71 @@ LEFT JOIN LATERAL ext_vacuum_statistics.pg_stats_get_vacuum_tables(db.oid, rel.o
 WHERE rel.relkind IN ('r', 'm', 't', 'o', 'b', 'M');
 
 COMMENT ON VIEW ext_vacuum_statistics.pg_stats_vacuum_tables IS
-  'Extended vacuum statistics per table (heap)';
+  'Extended vacuum statistics per table (heap and append-optimized)';
+
+-- View: AO/AOCS parent tables, with phase resources and applicable work counters.
+-- Read resource totals and phase counters together, including with stats_fetch_consistency = none.
+CREATE VIEW ext_vacuum_statistics.pg_stats_vacuum_ao_tables AS
+SELECT
+  rel.oid AS relid,
+  ns.nspname AS schema,
+  rel.relname,
+  db.datname AS dbname,
+  COALESCE(stats.total_blks_read, 0) AS total_blks_read,
+  COALESCE(stats.total_blks_hit, 0) AS total_blks_hit,
+  COALESCE(stats.total_blks_dirtied, 0) AS total_blks_dirtied,
+  COALESCE(stats.total_blks_written, 0) AS total_blks_written,
+  COALESCE(stats.wal_records, 0) AS wal_records,
+  COALESCE(stats.wal_fpi, 0) AS wal_fpi,
+  COALESCE(stats.wal_bytes, 0) AS wal_bytes,
+  COALESCE(stats.blk_read_time, 0) AS blk_read_time,
+  COALESCE(stats.blk_write_time, 0) AS blk_write_time,
+  COALESCE(stats.rel_blks_read, 0) AS rel_blks_read,
+  COALESCE(stats.rel_blks_hit, 0) AS rel_blks_hit,
+  work.tuples_deleted,
+  work.pages_scanned,
+  work.pages_removed,
+  work.recently_dead_tuples,
+  work.total_file_segs,
+  work.compacted_segments,
+  work.tuples_moved,
+  COALESCE(stats.awaiting_drop_segments, 0) AS awaiting_drop_segments,
+  COALESCE(stats.ao_pre_cleanup_blks_read, 0) AS ao_pre_cleanup_blks_read,
+  COALESCE(stats.ao_pre_cleanup_blks_hit, 0) AS ao_pre_cleanup_blks_hit,
+  COALESCE(stats.ao_pre_cleanup_blks_dirtied, 0) AS ao_pre_cleanup_blks_dirtied,
+  COALESCE(stats.ao_pre_cleanup_blks_written, 0) AS ao_pre_cleanup_blks_written,
+  COALESCE(stats.ao_pre_cleanup_wal_records, 0) AS ao_pre_cleanup_wal_records,
+  COALESCE(stats.ao_pre_cleanup_wal_fpi, 0) AS ao_pre_cleanup_wal_fpi,
+  COALESCE(stats.ao_pre_cleanup_wal_bytes, 0) AS ao_pre_cleanup_wal_bytes,
+  COALESCE(stats.ao_pre_cleanup_blk_read_time, 0) AS ao_pre_cleanup_blk_read_time,
+  COALESCE(stats.ao_pre_cleanup_blk_write_time, 0) AS ao_pre_cleanup_blk_write_time,
+  COALESCE(stats.ao_compaction_blks_read, 0) AS ao_compaction_blks_read,
+  COALESCE(stats.ao_compaction_blks_hit, 0) AS ao_compaction_blks_hit,
+  COALESCE(stats.ao_compaction_blks_dirtied, 0) AS ao_compaction_blks_dirtied,
+  COALESCE(stats.ao_compaction_blks_written, 0) AS ao_compaction_blks_written,
+  COALESCE(stats.ao_compaction_wal_records, 0) AS ao_compaction_wal_records,
+  COALESCE(stats.ao_compaction_wal_fpi, 0) AS ao_compaction_wal_fpi,
+  COALESCE(stats.ao_compaction_wal_bytes, 0) AS ao_compaction_wal_bytes,
+  COALESCE(stats.ao_compaction_blk_read_time, 0) AS ao_compaction_blk_read_time,
+  COALESCE(stats.ao_compaction_blk_write_time, 0) AS ao_compaction_blk_write_time,
+  COALESCE(stats.ao_post_cleanup_blks_read, 0) AS ao_post_cleanup_blks_read,
+  COALESCE(stats.ao_post_cleanup_blks_hit, 0) AS ao_post_cleanup_blks_hit,
+  COALESCE(stats.ao_post_cleanup_blks_dirtied, 0) AS ao_post_cleanup_blks_dirtied,
+  COALESCE(stats.ao_post_cleanup_blks_written, 0) AS ao_post_cleanup_blks_written,
+  COALESCE(stats.ao_post_cleanup_wal_records, 0) AS ao_post_cleanup_wal_records,
+  COALESCE(stats.ao_post_cleanup_wal_fpi, 0) AS ao_post_cleanup_wal_fpi,
+  COALESCE(stats.ao_post_cleanup_wal_bytes, 0) AS ao_post_cleanup_wal_bytes,
+  COALESCE(stats.ao_post_cleanup_blk_read_time, 0) AS ao_post_cleanup_blk_read_time,
+  COALESCE(stats.ao_post_cleanup_blk_write_time, 0) AS ao_post_cleanup_blk_write_time
+FROM pg_appendonly a
+JOIN pg_class rel ON rel.oid = a.relid
+JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+JOIN pg_database db ON db.datname = current_database()
+CROSS JOIN LATERAL pg_catalog.pg_stat_get_vacuum_stats(rel.oid) work
+LEFT JOIN LATERAL ext_vacuum_statistics.pg_stats_get_vacuum_ao_tables(db.oid, rel.oid) stats ON true;
+
+COMMENT ON VIEW ext_vacuum_statistics.pg_stats_vacuum_ao_tables IS
+  'Extended vacuum statistics and phase resources for AO/AOCS parent tables on the connected instance';
 
 -- View: vacuum statistics per index
 CREATE VIEW ext_vacuum_statistics.pg_stats_vacuum_indexes AS
@@ -173,7 +301,8 @@ SELECT
   COALESCE(stats.rel_blks_read, 0) AS rel_blks_read,
   COALESCE(stats.rel_blks_hit, 0) AS rel_blks_hit,
   work.tuples_deleted,
-  work.pages_deleted
+  work.pages_deleted,
+  work.dead_pages
 FROM pg_class rel
 JOIN pg_namespace ns ON ns.oid = rel.relnamespace
 JOIN pg_database db ON db.datname = current_database()
@@ -227,6 +356,16 @@ SELECT -1 AS gp_segment_id, *
 COMMENT ON VIEW ext_vacuum_statistics.gp_stats_vacuum_tables IS
   'Extended vacuum statistics per table, on every instance of the cluster';
 
+CREATE VIEW ext_vacuum_statistics.gp_stats_vacuum_ao_tables AS
+SELECT gp_execution_segment() AS gp_segment_id, *
+  FROM gp_dist_random('ext_vacuum_statistics.pg_stats_vacuum_ao_tables')
+UNION ALL
+SELECT -1 AS gp_segment_id, *
+  FROM ext_vacuum_statistics.pg_stats_vacuum_ao_tables;
+
+COMMENT ON VIEW ext_vacuum_statistics.gp_stats_vacuum_ao_tables IS
+  'Extended vacuum statistics and phase resources for AO/AOCS parent tables on every instance';
+
 CREATE VIEW ext_vacuum_statistics.gp_stats_vacuum_indexes AS
 SELECT gp_execution_segment() AS gp_segment_id, *
   FROM gp_dist_random('ext_vacuum_statistics.pg_stats_vacuum_indexes')
@@ -274,7 +413,19 @@ SELECT
   (sum(s.rel_blks_hit) / s.divisor)::bigint AS rel_blks_hit,
   (sum(s.tuples_deleted) / s.divisor)::bigint AS tuples_deleted,
   (sum(s.pages_scanned) / s.divisor)::bigint AS pages_scanned,
-  (sum(s.pages_removed) / s.divisor)::bigint AS pages_removed
+  (sum(s.pages_removed) / s.divisor)::bigint AS pages_removed,
+  (sum(s.tuples_frozen) / s.divisor)::bigint AS tuples_frozen,
+  (sum(s.recently_dead_tuples) / s.divisor)::bigint AS recently_dead_tuples,
+  (sum(s.missed_dead_pages) / s.divisor)::bigint AS missed_dead_pages,
+  (sum(s.missed_dead_tuples) / s.divisor)::bigint AS missed_dead_tuples,
+  (sum(s.pages_frozen) / s.divisor)::bigint AS pages_frozen,
+  (sum(s.pages_all_visible) / s.divisor)::bigint AS pages_all_visible,
+  (sum(s.total_file_segs) / s.divisor)::bigint AS total_file_segs,
+  (sum(s.compacted_segments) / s.divisor)::bigint AS compacted_segments,
+  (sum(s.tuples_moved) / s.divisor)::bigint AS tuples_moved,
+  (sum(s.dead_pages) / s.divisor)::bigint AS dead_pages,
+  (sum(s.freeze_age_vacuum_count) / s.divisor)::bigint AS freeze_age_vacuum_count,
+  (sum(s.awaiting_drop_segments) / s.divisor)::bigint AS awaiting_drop_segments
 FROM (
   SELECT v.*,
          CASE WHEN d.policytype = 'r' THEN d.numsegments ELSE 1 END AS divisor
@@ -305,12 +456,89 @@ SELECT
   rel_blks_hit,
   tuples_deleted,
   pages_scanned,
-  pages_removed
+  pages_removed,
+  tuples_frozen,
+  recently_dead_tuples,
+  missed_dead_pages,
+  missed_dead_tuples,
+  pages_frozen,
+  pages_all_visible,
+  total_file_segs,
+  compacted_segments,
+  tuples_moved,
+  dead_pages,
+  freeze_age_vacuum_count,
+  awaiting_drop_segments
 FROM ext_vacuum_statistics.pg_stats_vacuum_tables
 WHERE relid < 16384;
 
 COMMENT ON VIEW ext_vacuum_statistics.gp_stats_vacuum_tables_summary IS
   'Extended vacuum statistics per table, summed over the cluster';
+
+-- AO parent tables use their own distribution policy; auxiliary heaps remain
+-- in gp_stats_vacuum_tables_summary and inherit the parent's policy there.
+CREATE VIEW ext_vacuum_statistics.gp_stats_vacuum_ao_tables_summary AS
+SELECT
+  s.relid,
+  s.schema,
+  s.relname,
+  s.dbname,
+  (sum(s.total_blks_read) / s.divisor)::bigint AS total_blks_read,
+  (sum(s.total_blks_hit) / s.divisor)::bigint AS total_blks_hit,
+  (sum(s.total_blks_dirtied) / s.divisor)::bigint AS total_blks_dirtied,
+  (sum(s.total_blks_written) / s.divisor)::bigint AS total_blks_written,
+  (sum(s.wal_records) / s.divisor)::bigint AS wal_records,
+  (sum(s.wal_fpi) / s.divisor)::bigint AS wal_fpi,
+  (sum(s.wal_bytes) / s.divisor) AS wal_bytes,
+  (sum(s.blk_read_time) / s.divisor) AS blk_read_time,
+  (sum(s.blk_write_time) / s.divisor) AS blk_write_time,
+  (sum(s.rel_blks_read) / s.divisor)::bigint AS rel_blks_read,
+  (sum(s.rel_blks_hit) / s.divisor)::bigint AS rel_blks_hit,
+  (sum(s.tuples_deleted) / s.divisor)::bigint AS tuples_deleted,
+  (sum(s.pages_scanned) / s.divisor)::bigint AS pages_scanned,
+  (sum(s.pages_removed) / s.divisor)::bigint AS pages_removed,
+  (sum(s.recently_dead_tuples) / s.divisor)::bigint AS recently_dead_tuples,
+  (sum(s.total_file_segs) / s.divisor)::bigint AS total_file_segs,
+  (sum(s.compacted_segments) / s.divisor)::bigint AS compacted_segments,
+  (sum(s.tuples_moved) / s.divisor)::bigint AS tuples_moved,
+  (sum(s.awaiting_drop_segments) / s.divisor)::bigint AS awaiting_drop_segments,
+  (sum(s.ao_pre_cleanup_blks_read) / s.divisor)::bigint AS ao_pre_cleanup_blks_read,
+  (sum(s.ao_pre_cleanup_blks_hit) / s.divisor)::bigint AS ao_pre_cleanup_blks_hit,
+  (sum(s.ao_pre_cleanup_blks_dirtied) / s.divisor)::bigint AS ao_pre_cleanup_blks_dirtied,
+  (sum(s.ao_pre_cleanup_blks_written) / s.divisor)::bigint AS ao_pre_cleanup_blks_written,
+  (sum(s.ao_pre_cleanup_wal_records) / s.divisor)::bigint AS ao_pre_cleanup_wal_records,
+  (sum(s.ao_pre_cleanup_wal_fpi) / s.divisor)::bigint AS ao_pre_cleanup_wal_fpi,
+  (sum(s.ao_pre_cleanup_wal_bytes) / s.divisor) AS ao_pre_cleanup_wal_bytes,
+  (sum(s.ao_pre_cleanup_blk_read_time) / s.divisor) AS ao_pre_cleanup_blk_read_time,
+  (sum(s.ao_pre_cleanup_blk_write_time) / s.divisor) AS ao_pre_cleanup_blk_write_time,
+  (sum(s.ao_compaction_blks_read) / s.divisor)::bigint AS ao_compaction_blks_read,
+  (sum(s.ao_compaction_blks_hit) / s.divisor)::bigint AS ao_compaction_blks_hit,
+  (sum(s.ao_compaction_blks_dirtied) / s.divisor)::bigint AS ao_compaction_blks_dirtied,
+  (sum(s.ao_compaction_blks_written) / s.divisor)::bigint AS ao_compaction_blks_written,
+  (sum(s.ao_compaction_wal_records) / s.divisor)::bigint AS ao_compaction_wal_records,
+  (sum(s.ao_compaction_wal_fpi) / s.divisor)::bigint AS ao_compaction_wal_fpi,
+  (sum(s.ao_compaction_wal_bytes) / s.divisor) AS ao_compaction_wal_bytes,
+  (sum(s.ao_compaction_blk_read_time) / s.divisor) AS ao_compaction_blk_read_time,
+  (sum(s.ao_compaction_blk_write_time) / s.divisor) AS ao_compaction_blk_write_time,
+  (sum(s.ao_post_cleanup_blks_read) / s.divisor)::bigint AS ao_post_cleanup_blks_read,
+  (sum(s.ao_post_cleanup_blks_hit) / s.divisor)::bigint AS ao_post_cleanup_blks_hit,
+  (sum(s.ao_post_cleanup_blks_dirtied) / s.divisor)::bigint AS ao_post_cleanup_blks_dirtied,
+  (sum(s.ao_post_cleanup_blks_written) / s.divisor)::bigint AS ao_post_cleanup_blks_written,
+  (sum(s.ao_post_cleanup_wal_records) / s.divisor)::bigint AS ao_post_cleanup_wal_records,
+  (sum(s.ao_post_cleanup_wal_fpi) / s.divisor)::bigint AS ao_post_cleanup_wal_fpi,
+  (sum(s.ao_post_cleanup_wal_bytes) / s.divisor) AS ao_post_cleanup_wal_bytes,
+  (sum(s.ao_post_cleanup_blk_read_time) / s.divisor) AS ao_post_cleanup_blk_read_time,
+  (sum(s.ao_post_cleanup_blk_write_time) / s.divisor) AS ao_post_cleanup_blk_write_time
+FROM (
+  SELECT v.*,
+         CASE WHEN d.policytype = 'r' THEN d.numsegments ELSE 1 END AS divisor
+  FROM gp_dist_random('ext_vacuum_statistics.pg_stats_vacuum_ao_tables') v
+  LEFT JOIN gp_distribution_policy d ON d.localoid = v.relid
+) s
+GROUP BY s.relid, s.schema, s.relname, s.dbname, s.divisor;
+
+COMMENT ON VIEW ext_vacuum_statistics.gp_stats_vacuum_ao_tables_summary IS
+  'Extended AO/AOCS vacuum statistics summed over primary segments, normalized for replicated tables';
 
 CREATE VIEW ext_vacuum_statistics.gp_stats_vacuum_indexes_summary AS
 SELECT
@@ -330,7 +558,8 @@ SELECT
   (sum(s.rel_blks_read) / s.divisor)::bigint AS rel_blks_read,
   (sum(s.rel_blks_hit) / s.divisor)::bigint AS rel_blks_hit,
   (sum(s.tuples_deleted) / s.divisor)::bigint AS tuples_deleted,
-  (sum(s.pages_deleted) / s.divisor)::bigint AS pages_deleted
+  (sum(s.pages_deleted) / s.divisor)::bigint AS pages_deleted,
+  (sum(s.dead_pages) / s.divisor)::bigint AS dead_pages
 FROM (
   SELECT v.*,
          CASE WHEN d.policytype = 'r' THEN d.numsegments ELSE 1 END AS divisor
@@ -361,7 +590,8 @@ SELECT
   rel_blks_read,
   rel_blks_hit,
   tuples_deleted,
-  pages_deleted
+  pages_deleted,
+  dead_pages
 FROM ext_vacuum_statistics.pg_stats_vacuum_indexes
 WHERE indexrelid < 16384;
 
