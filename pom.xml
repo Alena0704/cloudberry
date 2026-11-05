@@ -37,7 +37,7 @@ code or new licensing patterns.
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.apache.cloudberry</groupId>
   <artifactId>apache-cloudberry-incubating</artifactId>
-  <version>2.0.0</version>
+  <version>3.0.0</version>
   <packaging>pom</packaging>
 
   <build>
@@ -1617,6 +1617,7 @@ code or new licensing patterns.
                 they carry no license header of their own.
             -->
             <exclude>licenses/LICENSE-amalgamate.txt</exclude>
+            <exclude>licenses/LICENSE-beerware-crypt-md5.txt</exclude>
             <exclude>licenses/LICENSE-boost.txt</exclude>
             <exclude>licenses/LICENSE-geqo.txt</exclude>
             <exclude>licenses/LICENSE-pg_dump.txt</exclude>
