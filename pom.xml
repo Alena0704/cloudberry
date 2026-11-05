@@ -37,7 +37,7 @@ code or new licensing patterns.
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.apache.cloudberry</groupId>
   <artifactId>apache-cloudberry-incubating</artifactId>
-  <version>2.0.0</version>
+  <version>3.0.0</version>
   <packaging>pom</packaging>
 
   <build>
@@ -49,6 +49,12 @@ code or new licensing patterns.
         <configuration>
           <consoleOutput>true</consoleOutput>
           <excludes>
+            <!-- Generated regression output must match the test runner's output;
+                 in particular, isolation spec comments are not echoed.
+                 These exact exclusions do not cover the extension's sources. -->
+            <exclude>contrib/ext_vacuum_statistics/expected/vacuum-extending-in-repetable-read.out</exclude>
+            <exclude>contrib/ext_vacuum_statistics/expected/ext_vacuum_statistics.out</exclude>
+
             <!--
                 The following files are part of the original Greenplum
                 Database open-source release, licensed under the Apache
@@ -550,8 +556,8 @@ code or new licensing patterns.
             <exclude>src/test/**/*.spec</exclude>
             <exclude>src/test/**/*.control</exclude>
 
-            <include>src/backend/gporca/data/**</include>
-            <include>src/backend/gporca/**/Makefile</include>
+            <exclude>src/backend/gporca/data/**</exclude>
+            <exclude>src/backend/gporca/**/Makefile</exclude>
 
             <exclude>src/backend/gporca/cmake/FindXerces.cmake</exclude>
             <exclude>src/backend/gporca/server/fixdxl.sh</exclude>
@@ -1617,6 +1623,7 @@ code or new licensing patterns.
                 they carry no license header of their own.
             -->
             <exclude>licenses/LICENSE-amalgamate.txt</exclude>
+            <exclude>licenses/LICENSE-beerware-crypt-md5.txt</exclude>
             <exclude>licenses/LICENSE-boost.txt</exclude>
             <exclude>licenses/LICENSE-geqo.txt</exclude>
             <exclude>licenses/LICENSE-pg_dump.txt</exclude>
