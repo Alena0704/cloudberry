@@ -115,6 +115,10 @@ SELECT n_live_tup, n_dead_tup, last_vacuum is not null as has_last_vacuum, vacuu
 -- phase (at injecting point vacuum_ao_post_cleanup_end), which is different from above case
 -- in which vacuum worker isn't changed.
 
+-- The post-cleanup worker only changes if the compact phase commit blocks on
+-- syncrep, which needs seg1's mirror to be in sync when we stop it below.
+SELECT wait_until_all_segments_synchronized();
+
 DROP TABLE IF EXISTS vacuum_progress_ao_row;
 CREATE TABLE vacuum_progress_ao_row(i int, j int);
 CREATE INDEX on vacuum_progress_ao_row(i);
@@ -134,6 +138,8 @@ DELETE FROM vacuum_progress_ao_row where j % 2 = 0;
 -- Suspend execution at the end of compact phase.
 2: SELECT gp_inject_fault('vacuum_ao_after_compact', 'suspend', dbid) FROM gp_segment_configuration WHERE content > -1 AND role = 'p';
 
+-- Hold the coordinator after the compact phase has committed, see below.
+2: SELECT gp_inject_fault('vacuum_rel_finished_one_relation', 'suspend', '', '', 'vacuum_progress_ao_row', 2, 2, 0, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
 1: set debug_appendonly_print_compaction to on;
 1&: vacuum vacuum_progress_ao_row;
 
@@ -161,6 +167,13 @@ select relid::regclass as relname, phase, heap_blks_total, heap_blks_scanned, he
 2: SELECT gp_inject_fault('vacuum_worker_changed', 'suspend', dbid) FROM gp_segment_configuration WHERE content > -1 AND role = 'p';
 -- resume walsender and let it exit so that mirror stop can be detected
 2: SELECT gp_inject_fault_infinite('wal_sender_loop', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' and content = 1;
+-- FTS releases the syncrep wait as soon as it has marked the mirror down,
+-- but only bumps the FTS version at the end of the probe cycle. Hold the
+-- coordinator until that cycle is over, otherwise the post-cleanup phase
+-- may start with the old version and reuse the old vacuum workers.
+2: SELECT gp_wait_until_triggered_fault('vacuum_rel_finished_one_relation', 1, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+2: SELECT gp_request_fts_probe_scan();
+2: SELECT gp_inject_fault('vacuum_rel_finished_one_relation', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
 -- Ensure we enter into the target logic which stops cumulative data but
 -- initializes a new vacrelstats at the beginning of post-cleanup phase.
 -- Also all segments should reach to the same "vacuum_worker_changed" point
@@ -215,6 +228,9 @@ DELETE FROM vacuum_progress_ao_row where j % 2 = 0;
 -- Suspend execution at the end of compact phase.
 2: SELECT gp_inject_fault('vacuum_ao_after_compact', 'suspend', dbid) FROM gp_segment_configuration WHERE content > -1 AND role = 'p';
 
+-- Hold the coordinator after the compact phase has committed, see below.
+2: SELECT gp_inject_fault('vacuum_rel_finished_one_relation', 'suspend', '', '', 'vacuum_progress_ao_row', 2, 2, 0, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+1: SET track_cost_delay_timing = on;
 1: set debug_appendonly_print_compaction to on;
 1&: vacuum vacuum_progress_ao_row;
 
@@ -242,11 +258,21 @@ select relid::regclass as relname, phase, heap_blks_total, heap_blks_scanned, he
 2: SELECT gp_inject_fault('vacuum_worker_changed', 'suspend', dbid) FROM gp_segment_configuration WHERE content > -1 AND role = 'p';
 -- resume walsender and let it exit so that mirror stop can be detected
 2: SELECT gp_inject_fault_infinite('wal_sender_loop', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' and content = 1;
+-- FTS releases the syncrep wait as soon as it has marked the mirror down,
+-- but only bumps the FTS version at the end of the probe cycle. Hold the
+-- coordinator until that cycle is over, otherwise the post-cleanup phase
+-- may start with the old version and reuse the old vacuum workers.
+2: SELECT gp_wait_until_triggered_fault('vacuum_rel_finished_one_relation', 1, dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
+2: SELECT gp_request_fts_probe_scan();
+2: SELECT gp_inject_fault('vacuum_rel_finished_one_relation', 'reset', dbid) FROM gp_segment_configuration WHERE role = 'p' AND content = -1;
 -- Ensure we enter into the target logic which stops cumulative data but
 -- initializes a new vacrelstats at the beginning of post-cleanup phase.
 -- Also all segments should reach to the same "vacuum_worker_changed" point
 -- due to FTS version being changed.
 2: SELECT gp_wait_until_triggered_fault('vacuum_worker_changed', 1, dbid) FROM gp_segment_configuration WHERE content > -1 AND role = 'p';
+-- Completed phase timing survives worker replacement before final reporting.
+SELECT bool_and(total_vacuum_time > 0 AND vacuum_count = 0) AS phase_timing_saved FROM gp_stat_all_tables WHERE relname = 'vacuum_progress_ao_row' AND gp_segment_id > -1;
+
 -- now seg1's mirror is marked as down
 2: SELECT content, role, preferred_role, mode, status FROM gp_segment_configuration WHERE content > -1;
 
@@ -262,6 +288,10 @@ select relid::regclass as relname, phase, heap_blks_total, heap_blks_scanned, he
 2: SELECT gp_inject_fault('vacuum_ao_post_cleanup_end', 'reset', dbid) FROM gp_segment_configuration WHERE content > -1 AND role = 'p';
 
 1<:
+-- The replacement gang inherits the session timing setting.
+1: SELECT bool_and(setting = 'on') AS timing_synced FROM gp_dist_random('pg_settings') WHERE name = 'track_cost_delay_timing';
+1: RESET track_cost_delay_timing;
+
 
 -- restore environment
 1: reset debug_appendonly_print_compaction;
