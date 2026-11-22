@@ -16,6 +16,7 @@
 #include "postmaster/pgarch.h"	/* for MAX_XFN_CHARS */
 #include "utils/backend_progress.h" /* for backward compatibility */
 #include "utils/backend_status.h"	/* for backward compatibility */
+#include "utils/pgstat_kind.h"
 #include "utils/relcache.h"
 #include "utils/wait_event.h"	/* for backward compatibility */
 
@@ -32,33 +33,6 @@
 
 /* Default directory to store temporary statistics data in */
 #define PG_STAT_TMP_DIR		"pg_stat_tmp"
-
-/* The types of statistics entries */
-typedef enum PgStat_Kind
-{
-	/* use 0 for INVALID, to catch zero-initialized data */
-	PGSTAT_KIND_INVALID = 0,
-
-	/* stats for variable-numbered objects */
-	PGSTAT_KIND_DATABASE,		/* database-wide statistics */
-	PGSTAT_KIND_RELATION,		/* per-table statistics */
-	PGSTAT_KIND_FUNCTION,		/* per-function statistics */
-	PGSTAT_KIND_REPLSLOT,		/* per-slot statistics */
-	PGSTAT_KIND_SUBSCRIPTION,	/* per-subscription statistics */
-	PGSTAT_KIND_RESQUEUE,		/* per-resource-queue statistics */
-
-	/* stats for fixed-numbered objects */
-	PGSTAT_KIND_ARCHIVER,
-	PGSTAT_KIND_BGWRITER,
-	PGSTAT_KIND_CHECKPOINTER,
-	PGSTAT_KIND_IO,
-	PGSTAT_KIND_SLRU,
-	PGSTAT_KIND_WAL,
-} PgStat_Kind;
-
-#define PGSTAT_KIND_FIRST_VALID PGSTAT_KIND_DATABASE
-#define PGSTAT_KIND_LAST PGSTAT_KIND_WAL
-#define PGSTAT_NUM_KINDS (PGSTAT_KIND_LAST + 1)
 
 /* Values for track_functions GUC variable --- order is significant! */
 typedef enum TrackFunctionsLevel
@@ -113,6 +87,27 @@ typedef struct PgStat_FunctionCounts
 	instr_time	total_time;
 	instr_time	self_time;
 } PgStat_FunctionCounts;
+
+/* Resource measurements collected during VACUUM. */
+typedef struct PgStat_CommonCounts
+{
+	int64		total_blks_read;
+	int64		total_blks_hit;
+	int64		total_blks_dirtied;
+	int64		total_blks_written;
+	int64		blks_fetched;
+	int64		blks_hit;
+	double		blk_read_time;
+	double		blk_write_time;
+	int64		wal_records;
+	int64		wal_fpi;
+	uint64		wal_bytes;
+}			PgStat_CommonCounts;
+
+typedef struct PgStat_VacuumRelationCounts
+{
+	PgStat_CommonCounts common;
+}			PgStat_VacuumRelationCounts;
 
 /*
  * Working state needed to accumulate per-function-call timing statistics.
@@ -238,7 +233,7 @@ typedef struct PgStat_TableXactStatus
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCAD
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCC0
 
 typedef struct PgStat_ArchiverStats
 {
@@ -652,6 +647,7 @@ extern void pgstat_unlink_relation(Relation rel);
 
 extern void pgstat_report_vacuum(Oid tableoid, bool shared,
 								 PgStat_Counter livetuples, PgStat_Counter deadtuples);
+
 extern void pgstat_report_analyze(Relation rel,
 								  PgStat_Counter livetuples, PgStat_Counter deadtuples,
 								  bool resetcounter);
